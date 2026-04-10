@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import pathlib
 from typing import TYPE_CHECKING, Any, Literal
 
 from minisgl.env import ENV
@@ -25,9 +26,47 @@ else:
     PyNCCLCommunicator = Any
 
 
+def _get_nccl_lib_path() -> str | None:
+    """Find the NCCL library path from nvidia-nccl-cu12 package."""
+    try:
+        import nvidia.nccl
+
+        # nvidia.nccl is a namespace package, use __path__ instead of __file__
+        nccl_pkg_path = pathlib.Path(nvidia.nccl.__path__[0])
+        nccl_lib = nccl_pkg_path / "lib"
+        if (nccl_lib / "libnccl.so.2").exists():
+            return str(nccl_lib)
+    except (ImportError, IndexError):
+        pass
+
+    # Fallback: check common locations
+    for path in [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/local/cuda/lib64",
+    ]:
+        if pathlib.Path(path).joinpath("libnccl.so").exists() or \
+           pathlib.Path(path).joinpath("libnccl.so.2").exists():
+            return path
+
+    return None
+
+
 @functools.cache
 def _load_nccl_module() -> Module:
-    return load_aot("pynccl", cuda_files=["pynccl.cu"], extra_ldflags=["-lnccl"])
+    nccl_lib_path = _get_nccl_lib_path()
+    extra_ldflags = []
+    if nccl_lib_path:
+        # Use full path to the library since libnccl.so may not exist (only libnccl.so.2)
+        nccl_lib = pathlib.Path(nccl_lib_path) / "libnccl.so.2"
+        if nccl_lib.exists():
+            extra_ldflags.append(str(nccl_lib))
+        else:
+            # Fallback to -L/-l if full path doesn't work
+            extra_ldflags.append(f"-L{nccl_lib_path}")
+            extra_ldflags.append("-lnccl")
+    else:
+        extra_ldflags.append("-lnccl")
+    return load_aot("pynccl", cuda_files=["pynccl.cu"], extra_ldflags=extra_ldflags)
 
 
 @functools.cache
