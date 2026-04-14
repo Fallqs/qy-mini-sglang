@@ -15,6 +15,7 @@ from minisgl.utils import init_logger
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
     server_port: int = 1919
+    distributed_port: int | None = None
     num_tokenizer: int = 0
     silent_output: bool = False
 
@@ -48,7 +49,8 @@ class ServerArgs(SchedulerConfig):
 
     @property
     def distributed_addr(self) -> str:
-        return f"tcp://127.0.0.1:{self.server_port + 1}"
+        port = self.distributed_port if self.distributed_port is not None else self.server_port + 1
+        return f"tcp://127.0.0.1:{port}"
 
 
 def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bool]:
@@ -143,6 +145,13 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         dest="server_port",
         default=ServerArgs.server_port,
         help="The port number for the server to listen on.",
+    )
+
+    parser.add_argument(
+        "--distributed-port",
+        type=int,
+        default=ServerArgs.distributed_port,
+        help="The TCP port used by torch.distributed rendezvous. Defaults to server port + 1.",
     )
 
     parser.add_argument(

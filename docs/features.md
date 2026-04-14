@@ -4,6 +4,22 @@
 
 Mini-SGLang supports online serving with an OpenAI-compatible API server. It provides the standard `/v1/chat/completions` endpoint, allowing seamless integration with existing tools and clients. For detailed command-line arguments and configuration options, run `python -m minisgl --help`.
 
+## Multi-Model Serving
+
+Mini-SGLang now includes a configuration-driven multi-model gateway entrypoint:
+
+```bash
+python -m minisgl.multi_model --config configs/multi_model.example.jsonc
+```
+
+This mode keeps the existing single-model server unchanged and adds a new deployment layer on top:
+- each model runs in an isolated Mini-SGLang instance with its own port and runtime arguments
+- one gateway exposes unified `/v1/models` and `/v1/chat/completions`
+- requests are routed by the `model` field
+- multiple replicas of the same model can be configured by repeating the same `model_name`
+
+The first version is intentionally minimal and is focused on engineering practicality. It does not yet include built-in auth, rate limiting, autoscaling, or deep internal inference metrics.
+
 ## Interactive Shell Mode
 
 For demonstration and testing purposes, an interactive shell mode is available. In this mode, users can input prompts directly, and the LLM will generate responses in real-time. The shell automatically caches chat history to maintain context. To clear the conversation history and start a new session, use the `/reset` command.

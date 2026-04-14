@@ -124,6 +124,38 @@ python -m minisgl --model "meta-llama/Llama-3.1-70B-Instruct" --tp 4 --port 3000
 
 Once the server is running, you can send requests using standard tools like `curl` or any OpenAI-compatible client.
 
+### 3.1 Multi-Model Serving
+
+For multi-model deployment, Mini-SGLang can run multiple isolated single-model instances behind one gateway.
+
+```bash
+python -m minisgl.multi_model --config configs/multi_model.example.jsonc
+```
+
+The gateway exposes a unified OpenAI-compatible endpoint and routes requests by the `model` field.
+
+```bash
+curl http://127.0.0.1:1930/v1/models
+```
+
+```bash
+curl http://127.0.0.1:1930/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-0.6b",
+    "messages": [{"role": "user", "content": "hello"}],
+    "max_tokens": 32,
+    "stream": true
+  }'
+```
+
+The first version focuses on deployment orchestration:
+- one model per isolated Mini-SGLang instance
+- one gateway process for model discovery and request routing
+- optional multiple replicas by repeating the same `model_name` in the config
+
+The gateway also exposes `GET /admin/instances` for basic instance status inspection.
+
 ### 4. Interactive Shell
 
 Chat with your model directly in the terminal by adding the `--shell` flag.
