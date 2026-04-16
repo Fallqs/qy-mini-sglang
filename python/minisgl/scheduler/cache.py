@@ -85,15 +85,25 @@ class CacheManager:
             req.cache_handle = new_handle
             self.lock(new_handle)
 
-    def check_integrity(self) -> None:
+    def check_integrity(self, strict: bool = True) -> None:
         self.prefix_cache.check_integrity()
         cache_pages = self.prefix_cache.size_info.total_size // self.page_size
         free_pages = self.allocator.available_pages(self.tenant_id)
-        if free_pages + cache_pages != self.num_pages:
+        # In multi-tenant mode other tenants may borrow pages from our segment,
+        # so free_pages + cache_pages can be < num_pages. Only enforce exact
+        # equality in single-tenant mode; otherwise just guard against overflow.
+        if strict:
+            if free_pages + cache_pages != self.num_pages:
+                raise RuntimeError(
+                    "CacheManager integrity check failed:"
+                    f" free_pages({free_pages}) +"
+                    f" cache_pages({cache_pages}) != num_pages({self.num_pages})"
+                )
+        elif free_pages + cache_pages > self.num_pages:
             raise RuntimeError(
                 "CacheManager integrity check failed:"
                 f" free_pages({free_pages}) +"
-                f" cache_pages({cache_pages}) != num_pages({self.num_pages})"
+                f" cache_pages({cache_pages}) > num_pages({self.num_pages})"
             )
 
     @contextmanager
