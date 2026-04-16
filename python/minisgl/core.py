@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Literal
@@ -121,16 +122,34 @@ class Context:
         finally:
             self._batch = None
 
+    @contextmanager
+    def bind(self):
+        push_global_ctx(self)
+        try:
+            yield self
+        finally:
+            pop_global_ctx()
 
-_GLOBAL_CTX: Context | None = None
+
+_GLOBAL_CTX_STACK = threading.local()
 
 
-def set_global_ctx(ctx: Context):
-    global _GLOBAL_CTX
-    assert _GLOBAL_CTX is None, "Global context is already set"
-    _GLOBAL_CTX = ctx
+def push_global_ctx(ctx: Context) -> None:
+    if not hasattr(_GLOBAL_CTX_STACK, "ctxs"):
+        _GLOBAL_CTX_STACK.ctxs = []
+    _GLOBAL_CTX_STACK.ctxs.append(ctx)
+
+
+def pop_global_ctx() -> None:
+    if hasattr(_GLOBAL_CTX_STACK, "ctxs") and _GLOBAL_CTX_STACK.ctxs:
+        _GLOBAL_CTX_STACK.ctxs.pop()
+
+
+def set_global_ctx(ctx: Context) -> None:
+    """Backward-compatible: replace the entire stack with a single context."""
+    _GLOBAL_CTX_STACK.ctxs = [ctx]
 
 
 def get_global_ctx() -> Context:
-    assert _GLOBAL_CTX is not None, "Global context is not set"
-    return _GLOBAL_CTX
+    assert hasattr(_GLOBAL_CTX_STACK, "ctxs") and _GLOBAL_CTX_STACK.ctxs, "No active context"
+    return _GLOBAL_CTX_STACK.ctxs[-1]

@@ -129,7 +129,7 @@ Once the server is running, you can send requests using standard tools like `cur
 Chat with your model directly in the terminal by adding the `--shell` flag.
 
 ```bash
-python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
+python -u -m minisgl --model "Qwen/Qwen3-0.6B" --shell
 ```
 
 ![shell-example](https://lmsys.org/images/blog/minisgl/shell.png)

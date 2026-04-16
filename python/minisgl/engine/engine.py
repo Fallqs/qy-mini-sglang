@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import Any, Dict, NamedTuple, Tuple
 
 import torch
-from minisgl.attention import create_attention_backend
-from minisgl.core import Batch, Context, Req, set_global_ctx
-from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
-from minisgl.kvcache import create_kvcache_pool
-from minisgl.layers import set_rope_device
-from minisgl.models import create_model, load_weight
-from minisgl.moe import create_moe_backend
-from minisgl.utils import div_even, init_logger, is_sm90_supported, is_sm100_supported, torch_dtype
+from minisgl.core import Batch, Req
+from minisgl.distributed import set_tp_info
+from minisgl.utils import div_even, init_logger, is_sm100_supported, is_sm90_supported, torch_dtype
 
 from .config import EngineConfig
-from .graph import GraphRunner, get_free_memory, mem_GB
-from .sample import BatchSamplingArgs, Sampler
+from .graph import mem_GB
+from .kv_pool import KVPoolManager
+from .model_registry import ModelRegistry
+from .runtime import ExecutionRuntime
+from .sample import BatchSamplingArgs
+from .tenant import TenantConfig, TenantContext
 
 logger = init_logger(__name__)
 
@@ -26,156 +24,120 @@ class ForwardOutput(NamedTuple):
     copy_done_event: torch.cuda.Event
 
 
-class Engine:
-    def __init__(self, config: EngineConfig):
+class MultiTenantEngine:
+    """Multi-tenant inference engine supporting heterogeneous models and shared KV pools."""
+
+    def __init__(self, base_config: EngineConfig):
         assert not torch.cuda.is_initialized()
-        set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
-        _adjust_config(config)
+        set_tp_info(rank=base_config.tp_info.rank, size=base_config.tp_info.size)
+        _adjust_config(base_config)
 
-        self.device = torch.device(f"cuda:{config.tp_info.rank}")
-        torch.cuda.set_device(self.device)
-        torch.manual_seed(42)
-        self.stream = torch.cuda.Stream()
-        torch.cuda.set_stream(self.stream)
-        self.dtype = config.dtype
-        self.ctx = Context(config.page_size)
-        set_global_ctx(self.ctx)
+        self.base_config = base_config
+        self.runtime = ExecutionRuntime(base_config)
 
-        self.tp_cpu_group = self._init_communication(config)
         init_free_memory = self._sync_get_memory()[1]
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
-        # ======================= Model initialization ========================
-        set_rope_device(self.device)
-        with torch.device("meta"), torch_dtype(config.dtype):
-            self.model = create_model(config.model_config)
-        self.model.load_state_dict(self._load_weight_state_dict(config))
+        # Determine total KV pages across all tenants
+        total_num_pages = _determine_total_num_pages(init_free_memory, base_config)
 
-        # ======================= KV cache initialization ========================
-        self.num_pages = self._determine_num_pages(init_free_memory, config)
-        num_tokens = self.num_pages * config.page_size
-        self.ctx.kv_cache = self.kv_cache = create_kvcache_pool(
-            model_config=config.model_config,
-            num_pages=self.num_pages + 1,  # +1 for dummy page
-            page_size=config.page_size,
-            device=self.device,
-            dtype=self.dtype,
+        self.pool_mgr = KVPoolManager(
+            device=self.runtime.device,
+            total_num_pages=total_num_pages,
+            page_size=base_config.page_size,
+            dtype=base_config.dtype,
+            base_model_config=base_config.model_config,
         )
-
-        # ======================= Page table initialization ========================
-        # NOTE: 1. aligned to 128 bytes; 2. store raw locations instead of pages
-        self.max_seq_len = min(config.max_seq_len, num_tokens)
-        aligned_max_seq_len = _align_up_32(self.max_seq_len)
-        self.ctx.page_table = self.page_table = torch.zeros(  # + 1 for dummy request
-            (config.max_running_req + 1, aligned_max_seq_len),
-            dtype=torch.int32,
-            device=self.device,
-        )
-
-        # ======================= Attention & MoE backend initialization ========================
-        self.ctx.attn_backend = self.attn_backend = create_attention_backend(
-            config.attention_backend, config.model_config
-        )
-        if config.model_config.is_moe:
-            self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
-
-        # ======================= Sampler initialization ========================
-        self.sampler = Sampler(self.device, config.model_config.vocab_size)
+        self.model_registry = ModelRegistry(self.runtime)
+        self.tenants: Dict[str, TenantContext] = {}
+        self.default_tenant_id: str | None = None
 
         post_free_memory = self._sync_get_memory()[0]
-        logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
+        logger.info_rank0(f"Free memory after engine init: {mem_GB(post_free_memory)}")
 
-        # ======================= Graph capture initialization ========================
-        self.dummy_req = Req(
-            input_ids=torch.tensor([0], dtype=torch.int32, device="cpu"),
-            table_idx=config.max_running_req,
-            cached_len=0,
-            output_len=1,
-            uid=-1,
-            sampling_params=None,  # type: ignore
-            cache_handle=None,  # type: ignore
-        )
-        self.page_table[self.dummy_req.table_idx].fill_(num_tokens)  # point to dummy page
-        self.graph_runner = GraphRunner(
-            stream=self.stream,
-            device=self.device,
-            model=self.model,
-            attn_backend=self.attn_backend,
-            cuda_graph_bs=config.cuda_graph_bs,
-            cuda_graph_max_bs=config.cuda_graph_max_bs,
-            free_memory=init_free_memory,
-            max_seq_len=aligned_max_seq_len,
-            vocab_size=config.model_config.vocab_size,
-            dummy_req=self.dummy_req,
-        )
+    @property
+    def device(self) -> torch.device:
+        return self.runtime.device
 
-    def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
-        if config.tp_info.size == 1 or config.use_pynccl:
-            torch.distributed.init_process_group(
-                backend="gloo",
-                rank=config.tp_info.rank,
-                world_size=config.tp_info.size,
-                timeout=timedelta(seconds=config.distributed_timeout),
-                init_method=config.distributed_addr,
-            )
-            tp_cpu_group = torch.distributed.group.WORLD
-            assert tp_cpu_group is not None
-            max_bytes = (
-                config.max_forward_len * config.model_config.hidden_size * self.dtype.itemsize
-            )
-            enable_pynccl_distributed(config.tp_info, tp_cpu_group, max_bytes)
-        else:
-            torch.distributed.init_process_group(
-                backend="nccl",
-                rank=config.tp_info.rank,
-                world_size=config.tp_info.size,
-                timeout=timedelta(seconds=config.distributed_timeout),
-                init_method=config.distributed_addr,
-            )
-            tp_cpu_group = torch.distributed.new_group(backend="gloo")
-            assert tp_cpu_group is not None
-        return tp_cpu_group
+    @property
+    def stream(self) -> torch.cuda.Stream:
+        return self.runtime.stream
 
-    def _load_weight_state_dict(self, config: EngineConfig) -> Dict[str, torch.Tensor]:
-        if config.use_dummy_weight:
-            return {
-                k: torch.randn_like(v, device=self.device)
-                for k, v in self.model.state_dict().items()
-            }
-        else:
-            return {k: v.to(self.dtype) for k, v in load_weight(config.model_path, self.device)}
+    @property
+    def tp_cpu_group(self) -> torch.distributed.ProcessGroup:
+        return self.runtime.tp_cpu_group
 
-    def _determine_num_pages(self, old_free_memory: int, config: EngineConfig) -> int:
-        new_free_memory = self._sync_get_memory()[1]
-        cache_per_page = (
-            2  # key + value
-            * config.model_config.head_dim
-            * div_even(config.model_config.num_kv_heads, config.tp_info.size, allow_replicate=True)
-            * config.page_size
-            * self.dtype.itemsize
-            * config.model_config.num_layers
-        )
-        num_pages = config.num_page_override
+    def add_tenant(
+        self,
+        tenant_id: str,
+        config: EngineConfig | None = None,
+        num_pages: int | None = None,
+    ) -> TenantContext:
+        if tenant_id in self.tenants:
+            raise ValueError(f"Tenant {tenant_id} already exists")
+
+        cfg = config or self.base_config
+        _adjust_config(cfg)
+        tenant_config = TenantConfig.from_engine_config(tenant_id, cfg)
+
         if num_pages is None:
-            model_memory = old_free_memory - new_free_memory
-            available_memory = int(config.memory_ratio * old_free_memory) - model_memory
-            num_pages = available_memory // cache_per_page
+            num_pages = _determine_tenant_num_pages(cfg, self.pool_mgr.allocator.num_pages)
 
-        assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-pages"
-        num_tokens = num_pages * config.page_size
-        real_kv_size = num_pages * cache_per_page
-        logger.info(f"Allocating {num_tokens} tokens for KV cache, K + V = {mem_GB(real_kv_size)}")
-        return num_pages
+        tenant = TenantContext(
+            config=tenant_config,
+            runtime=self.runtime,
+            pool_mgr=self.pool_mgr,
+            model_registry=self.model_registry,
+            num_pages=num_pages,
+        )
+        self.tenants[tenant_id] = tenant
+        if self.default_tenant_id is None:
+            self.default_tenant_id = tenant_id
+        return tenant
+
+    def get_tenant(self, tenant_id: str | None = None) -> TenantContext:
+        if tenant_id is None:
+            tenant_id = self.default_tenant_id
+        if tenant_id is None or tenant_id not in self.tenants:
+            raise ValueError(f"Tenant {tenant_id} not found")
+        return self.tenants[tenant_id]
+
+    def forward_batch(
+        self, batch: Batch, args: BatchSamplingArgs, tenant_id: str | None = None
+    ) -> ForwardOutput:
+        tenant = self.get_tenant(tenant_id)
+        tenant.ensure_active()
+        assert torch.cuda.current_stream() == self.runtime.stream
+        with tenant.bind(batch):
+            if tenant.graph_runner.can_use_cuda_graph(batch):
+                logits = tenant.graph_runner.replay(batch)
+            else:
+                logits = tenant.model_handle.active_model.forward()
+
+        for req in batch.reqs:
+            req.complete_one()
+
+        next_tokens_gpu = tenant.sampler.sample(logits[: batch.size], args).to(torch.int32)
+        next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
+        copy_done_event = torch.cuda.Event()
+        copy_done_event.record(self.runtime.stream)
+        return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
+
+    def shutdown(self) -> None:
+        for tenant in self.tenants.values():
+            if tenant.graph_runner is not None:
+                tenant.graph_runner.destroy_cuda_graphs()
+        self.runtime.shutdown()
 
     def _sync_get_memory(self) -> Tuple[int, int]:
         """Get the min and max free memory across TP ranks."""
-        torch.cuda.synchronize(self.device)
+        torch.cuda.synchronize(self.runtime.device)
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(self.device)
-        free_memory = get_free_memory(self.device)
+        torch.cuda.reset_peak_memory_stats(self.runtime.device)
+        free_memory = get_free_memory(self.runtime.device)
         free_mem_tensor = torch.tensor([free_memory, -free_memory], device="cpu", dtype=torch.int64)
         torch.distributed.all_reduce(
-            free_mem_tensor, op=torch.distributed.ReduceOp.MIN, group=self.tp_cpu_group
+            free_mem_tensor, op=torch.distributed.ReduceOp.MIN, group=self.runtime.tp_cpu_group
         )
         min_free_memory = int(free_mem_tensor[0].item())
         max_free_memory = -int(free_mem_tensor[1].item())
@@ -188,31 +150,69 @@ class Engine:
 
         return min_free_memory, max_free_memory
 
+
+# Backward-compatible alias: single-tenant engine
+class Engine(MultiTenantEngine):
+    """Backward-compatible single-tenant engine."""
+
+    def __init__(self, config: EngineConfig):
+        super().__init__(config)
+        self.add_tenant("default", config)
+        # Activate immediately to create CUDA graphs (backward compat)
+        default = self.get_tenant("default")
+        default.ensure_active()
+        # Expose default tenant attributes for old code
+        self.page_table = default.page_table
+        self.num_pages = default.num_pages
+        self.max_seq_len = default.max_seq_len
+        self.attn_backend = default.attn_backend
+        self.sampler = default.sampler
+        self.graph_runner = default.graph_runner
+        self.dummy_req = default.dummy_req
+        self.kv_cache = default.kv_pool.pool
+
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
-        assert torch.cuda.current_stream() == self.stream
-        with self.ctx.forward_batch(batch):
-            if self.graph_runner.can_use_cuda_graph(batch):
-                logits = self.graph_runner.replay(batch)
-            else:
-                logits = self.model.forward()
+        return super().forward_batch(batch, args, tenant_id="default")
 
-        for req in batch.reqs:
-            req.complete_one()
 
-        next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
-        next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
-        copy_done_event = torch.cuda.Event()
-        copy_done_event.record(self.stream)
-        return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
-
-    def shutdown(self) -> None:
-        self.graph_runner.destroy_cuda_graphs()
-        torch.distributed.destroy_process_group()
-        destroy_distributed()
+def get_free_memory(device: torch.device) -> int:
+    return torch.cuda.mem_get_info(device)[0]
 
 
 def _align_up_32(num: int) -> int:
     return (num + 31) // 32 * 32
+
+
+def _determine_total_num_pages(init_free_memory: int, config: EngineConfig) -> int:
+    """Determine total number of pages available for all tenants."""
+    # We need an estimate of cache size per page. Use base config model.
+    cache_per_page = (
+        2
+        * config.model_config.head_dim
+        * div_even(config.model_config.num_kv_heads, config.tp_info.size, allow_replicate=True)
+        * config.page_size
+        * config.dtype.itemsize
+        * config.model_config.num_layers
+    )
+    num_pages = config.num_page_override
+    if num_pages is None:
+        # We don't know model memory yet since models are loaded lazily.
+        # Reserve 50% of free memory for models, use the rest for KV.
+        available_memory = int(0.5 * init_free_memory)
+        num_pages = available_memory // cache_per_page
+
+    assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-pages"
+    num_tokens = num_pages * config.page_size
+    real_kv_size = num_pages * cache_per_page
+    logger.info(f"Allocating {num_tokens} total tokens for KV cache, K + V = {mem_GB(real_kv_size)}")
+    return num_pages
+
+
+def _determine_tenant_num_pages(config: EngineConfig, total_num_pages: int) -> int:
+    """Determine number of pages for a single tenant."""
+    # For now, divide evenly. Later this can be quota-based.
+    # Default to using all pages (single tenant behavior).
+    return total_num_pages
 
 
 def _adjust_config(config: EngineConfig):

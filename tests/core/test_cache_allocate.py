@@ -14,10 +14,10 @@ from minisgl.scheduler.cache import CacheManager
 @pytest.fixture(autouse=True)
 def reset_global_ctx():
     """Reset global context before and after each test."""
-    old_ctx = core._GLOBAL_CTX
-    core._GLOBAL_CTX = None
+    old_ctxs = getattr(core._GLOBAL_CTX_STACK, "ctxs", [])
+    core._GLOBAL_CTX_STACK.ctxs = []
     yield
-    core._GLOBAL_CTX = old_ctx
+    core._GLOBAL_CTX_STACK.ctxs = old_ctxs
 
 
 def _make_cache_manager(num_pages: int, page_size: int) -> CacheManager:

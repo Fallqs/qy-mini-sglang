@@ -18,7 +18,7 @@ from .base import (
 
 
 class CacheManagerCreator(Protocol):
-    def __call__(self, device: torch.device) -> BasePrefixCache: ...
+    def __call__(self, device: torch.device, page_size: int = 1) -> BasePrefixCache: ...
 
 
 SUPPORTED_CACHE_MANAGER = Registry[CacheManagerCreator]("Cache Manager")
@@ -33,7 +33,7 @@ def create_kvcache_pool(
 ) -> BaseKVCachePool:
     from .mha_pool import MHAKVCache  # TODO: support other variants (e.g. MLA)
 
-    return MHAKVCache(
+    return MHAKVCache.from_model_config(
         num_kv_heads=model_config.num_kv_heads,
         num_pages=num_pages,
         page_size=page_size,
@@ -45,21 +45,21 @@ def create_kvcache_pool(
 
 
 @SUPPORTED_CACHE_MANAGER.register("naive")
-def create_naive_cache(device: torch.device):
+def create_naive_cache(device: torch.device, page_size: int = 1):
     from .naive_cache import NaivePrefixCache
 
     return NaivePrefixCache(device=device)
 
 
 @SUPPORTED_CACHE_MANAGER.register("radix")
-def create_radix_cache(device: torch.device):
+def create_radix_cache(device: torch.device, page_size: int = 1):
     from .radix_cache import RadixPrefixCache
 
-    return RadixPrefixCache(device=device)
+    return RadixPrefixCache(device=device, page_size=page_size)
 
 
-def create_prefix_cache(device: torch.device, type: str) -> BasePrefixCache:
-    return SUPPORTED_CACHE_MANAGER[type](device)
+def create_prefix_cache(device: torch.device, type: str, page_size: int = 1) -> BasePrefixCache:
+    return SUPPORTED_CACHE_MANAGER[type](device, page_size)
 
 
 __all__ = [
