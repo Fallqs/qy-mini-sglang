@@ -16,9 +16,6 @@ class ExecutionRuntime:
     """Shared execution primitives across all tenants on one GPU/TP rank."""
 
     def __init__(self, config: EngineConfig):
-        assert not torch.cuda.is_initialized()
-        set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
-
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
         torch.cuda.set_device(self.device)
         torch.manual_seed(42)

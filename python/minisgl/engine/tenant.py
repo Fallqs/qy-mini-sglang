@@ -76,19 +76,19 @@ class TenantContext:
     ):
         self.config = config
         self.runtime = runtime
-        self.num_pages = num_pages
-        num_tokens = num_pages * config.page_size
-        self.max_seq_len = min(config.max_seq_len, num_tokens)
-        aligned_max_seq_len = _align_up_32(self.max_seq_len)
 
         # Model handle
         self.model_handle = model_registry.get_or_create(
             config.tenant_id, config.model_path, config.model_config, config.use_dummy_weight
         )
 
-        # KV pool
+        # KV pool (allocator may cap num_pages based on global budget)
         self.kv_pool: VirtualKVPool = pool_mgr.register_pool(config.tenant_id, config.model_config)
         self.kv_pool.allocate(num_pages)
+        self.num_pages = self.kv_pool.num_pages
+        num_tokens = self.num_pages * config.page_size
+        self.max_seq_len = min(config.max_seq_len, num_tokens)
+        aligned_max_seq_len = _align_up_32(self.max_seq_len)
 
         # Page table
         self.page_table = torch.zeros(

@@ -19,50 +19,74 @@ class MockTPInfo:
 
 
 def _inject_minisgl():
-    if "minisgl" in sys.modules:
-        return
     import types
     import importlib.util
 
-    dist = types.ModuleType("minisgl.distributed")
-    dist.get_tp_info = lambda: MockTPInfo()
-    sys.modules["minisgl.distributed"] = dist
+    if "minisgl.distributed" in sys.modules:
+        sys.modules["minisgl.distributed"].get_tp_info = lambda: MockTPInfo()
+    else:
+        dist = types.ModuleType("minisgl.distributed")
+        dist.get_tp_info = lambda: MockTPInfo()
+        sys.modules["minisgl.distributed"] = dist
 
-    utils = types.ModuleType("minisgl.utils")
-    utils.div_even = lambda n, d, allow_replicate=False: n // d
-    utils.init_logger = lambda name: type("Logger", (), {"info": lambda *a, **k: None, "warning": lambda *a, **k: None})()
-    sys.modules["minisgl.utils"] = utils
+    if "minisgl.utils" in sys.modules:
+        utils = sys.modules["minisgl.utils"]
+    else:
+        utils = types.ModuleType("minisgl.utils")
+        sys.modules["minisgl.utils"] = utils
+    if not hasattr(utils, "div_even"):
+        utils.div_even = lambda n, d, allow_replicate=False: n // d
+    if not hasattr(utils, "init_logger"):
+        utils.init_logger = lambda name: type("Logger", (), {"info": lambda *a, **k: None, "warning": lambda *a, **k: None})()
 
-    spec = importlib.util.spec_from_file_location("minisgl.kvcache.base", "python/minisgl/kvcache/base.py")
-    base_mod = importlib.util.module_from_spec(spec)
-    sys.modules["minisgl.kvcache.base"] = base_mod
-    spec.loader.exec_module(base_mod)
+    if "minisgl.kvcache.base" in sys.modules:
+        base_mod = sys.modules["minisgl.kvcache.base"]
+    else:
+        spec = importlib.util.spec_from_file_location("minisgl.kvcache.base", "python/minisgl/kvcache/base.py")
+        base_mod = importlib.util.module_from_spec(spec)
+        sys.modules["minisgl.kvcache.base"] = base_mod
+        spec.loader.exec_module(base_mod)
 
-    spec = importlib.util.spec_from_file_location("minisgl.kvcache.mha_pool", "python/minisgl/kvcache/mha_pool.py")
-    mha_mod = importlib.util.module_from_spec(spec)
-    sys.modules["minisgl.kvcache.mha_pool"] = mha_mod
-    spec.loader.exec_module(mha_mod)
+    if "minisgl.kvcache.mha_pool" in sys.modules:
+        mha_mod = sys.modules["minisgl.kvcache.mha_pool"]
+    else:
+        spec = importlib.util.spec_from_file_location("minisgl.kvcache.mha_pool", "python/minisgl/kvcache/mha_pool.py")
+        mha_mod = importlib.util.module_from_spec(spec)
+        sys.modules["minisgl.kvcache.mha_pool"] = mha_mod
+        spec.loader.exec_module(mha_mod)
 
-    kvcache = types.ModuleType("minisgl.kvcache")
+    if "minisgl.kvcache" in sys.modules:
+        kvcache = sys.modules["minisgl.kvcache"]
+    else:
+        kvcache = types.ModuleType("minisgl.kvcache")
+        sys.modules["minisgl.kvcache"] = kvcache
     kvcache.BaseKVCachePool = base_mod.BaseKVCachePool
     kvcache.MHAKVCache = mha_mod.MHAKVCache
-    sys.modules["minisgl.kvcache"] = kvcache
 
-    spec = importlib.util.spec_from_file_location("minisgl.engine.segment_list", "python/minisgl/engine/segment_list.py")
-    seg_mod = importlib.util.module_from_spec(spec)
-    sys.modules["minisgl.engine.segment_list"] = seg_mod
-    spec.loader.exec_module(seg_mod)
+    if "minisgl.engine.segment_list" in sys.modules:
+        seg_mod = sys.modules["minisgl.engine.segment_list"]
+    else:
+        spec = importlib.util.spec_from_file_location("minisgl.engine.segment_list", "python/minisgl/engine/segment_list.py")
+        seg_mod = importlib.util.module_from_spec(spec)
+        sys.modules["minisgl.engine.segment_list"] = seg_mod
+        spec.loader.exec_module(seg_mod)
 
-    engine_pkg = types.ModuleType("minisgl.engine")
+    if "minisgl.engine" in sys.modules:
+        engine_pkg = sys.modules["minisgl.engine"]
+    else:
+        engine_pkg = types.ModuleType("minisgl.engine")
+        sys.modules["minisgl.engine"] = engine_pkg
     engine_pkg.segment_list = seg_mod
-    sys.modules["minisgl.engine"] = engine_pkg
 
-    minisgl = types.ModuleType("minisgl")
-    minisgl.distributed = dist
+    if "minisgl" in sys.modules:
+        minisgl = sys.modules["minisgl"]
+    else:
+        minisgl = types.ModuleType("minisgl")
+        sys.modules["minisgl"] = minisgl
+    minisgl.distributed = sys.modules["minisgl.distributed"]
     minisgl.utils = utils
     minisgl.kvcache = kvcache
     minisgl.engine = engine_pkg
-    sys.modules["minisgl"] = minisgl
 
 
 def _load_kv_pool():

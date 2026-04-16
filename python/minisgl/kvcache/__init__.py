@@ -15,6 +15,7 @@ from .base import (
     MatchResult,
     SizeInfo,
 )
+from .mha_pool import MHAKVCache
 
 
 class CacheManagerCreator(Protocol):
@@ -71,4 +72,5 @@ __all__ = [
     "SizeInfo",
     "MatchResult",
     "SUPPORTED_CACHE_MANAGER",
+    "MHAKVCache",
 ]

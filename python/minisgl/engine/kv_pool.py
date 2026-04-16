@@ -34,9 +34,9 @@ class GlobalFineAllocator:
         self._tenants: Dict[str, _TenantPageInfo] = {}
         self.device = device
 
-    def register_tenant(self, tenant_id: str, model_config: ModelConfig, page_size: int, num_pages: int) -> None:
+    def register_tenant(self, tenant_id: str, model_config: ModelConfig, page_size: int, num_pages: int) -> int:
         if tenant_id in self._tenants:
-            return
+            return self._tenants[tenant_id].num_pages
         tp_info = get_tp_info()
         local_kv_heads = div_even(model_config.num_kv_heads, tp_info.size, allow_replicate=True)
         m_i = local_kv_heads * model_config.head_dim
@@ -74,6 +74,7 @@ class GlobalFineAllocator:
             seg_list=seg_list,
             page_ref_counts=ref_counts,
         )
+        return capped_num_pages
 
     def available_pages(self, tenant_id: str) -> int:
         return self._tenants[tenant_id].seg_list.total_clean
@@ -190,11 +191,17 @@ class VirtualKVPool:
         assert self._pool is not None, "VirtualKVPool not allocated yet"
         return self._pool
 
+    @property
+    def num_pages(self) -> int:
+        return self._num_pages
+
     def allocate(self, num_pages: int) -> None:
         if self._pool is not None:
             return
-        self._num_pages = num_pages
-        self.allocator.register_tenant(self.tenant_id, self.model_config, self.page_size, num_pages)
+        capped_num_pages = self.allocator.register_tenant(
+            self.tenant_id, self.model_config, self.page_size, num_pages
+        )
+        self._num_pages = capped_num_pages
 
         tp_info = get_tp_info()
         local_kv_heads = div_even(self.model_config.num_kv_heads, tp_info.size, allow_replicate=True)
@@ -211,11 +218,12 @@ class VirtualKVPool:
         for layer_id in range(num_layers):
             layer_tensor = self.pool_mgr.global_kv[layer_id]
             # layer_tensor shape: (2, total_fine_units, 1)
+            # Attention backends expect 4-D cache: (tokens, page_size, heads, dim)
             k_view = layer_tensor[0, : num_tokens_global * m_i, 0].view(
-                num_tokens_global, local_kv_heads, self.model_config.head_dim
+                num_tokens_global, 1, local_kv_heads, self.model_config.head_dim
             )
             v_view = layer_tensor[1, : num_tokens_global * m_i, 0].view(
-                num_tokens_global, local_kv_heads, self.model_config.head_dim
+                num_tokens_global, 1, local_kv_heads, self.model_config.head_dim
             )
             k_buffers.append(k_view)
             v_buffers.append(v_view)
@@ -261,6 +269,7 @@ class KVPoolManager:
             self.fine_units_per_layer = total_num_pages * page_size
             self.max_layers = 1
 
+        self.total_num_pages = total_num_pages
         self.allocator = GlobalFineAllocator(self.fine_units_per_layer, device)
         self.global_kv: List[torch.Tensor] = []
         self._ensure_layers(self.max_layers)

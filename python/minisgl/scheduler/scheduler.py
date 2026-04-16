@@ -264,21 +264,26 @@ class Scheduler(SchedulerIOMixin):
         )
 
     def _schedule_next_batch(self) -> ForwardInput | None:
-        # Collect runnable batches from all tenants
-        candidates: List[Tuple[str, Batch]] = []
+        # Decode batches can be inspected without mutating state.
+        decode_candidates: List[Tuple[str, Batch]] = []
+        for tenant_id, unit in self.tenant_units.items():
+            batch = unit.decode_manager.schedule_next_batch()
+            if batch is not None:
+                decode_candidates.append((tenant_id, batch))
+
+        if decode_candidates:
+            # TODO: support other policies: e.g. round-robin, largest batch
+            tenant_id, batch = max(decode_candidates, key=lambda x: x[1].size)
+            return self._prepare_batch(tenant_id, batch)
+
+        # Prefill batches mutate tenant state (table/cache allocation), so only
+        # schedule the first tenant that can produce a batch.
         for tenant_id, unit in self.tenant_units.items():
             batch = unit.prefill_manager.schedule_next_batch(self.prefill_budget)
-            if batch is None:
-                batch = unit.decode_manager.schedule_next_batch()
             if batch is not None:
-                candidates.append((tenant_id, batch))
+                return self._prepare_batch(tenant_id, batch)
 
-        if not candidates:
-            return None
-
-        # TODO: support other policies: e.g. DECODE first, round-robin, largest batch
-        tenant_id, batch = max(candidates, key=lambda x: x[1].size)
-        return self._prepare_batch(tenant_id, batch)
+        return None
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         tenant_id = forward_input.tenant_id

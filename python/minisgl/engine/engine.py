@@ -81,7 +81,7 @@ class MultiTenantEngine:
         tenant_config = TenantConfig.from_engine_config(tenant_id, cfg)
 
         if num_pages is None:
-            num_pages = _determine_tenant_num_pages(cfg, self.pool_mgr.allocator.num_pages)
+            num_pages = _determine_tenant_num_pages(cfg, self.pool_mgr.total_num_pages)
 
         tenant = TenantContext(
             config=tenant_config,
