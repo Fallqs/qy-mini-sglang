@@ -186,7 +186,15 @@ class Scheduler(SchedulerIOMixin):
                 finished = not req.can_decode
                 if not req.sampling_params.ignore_eos:
                     finished |= next_token == unit.eos_token_id
-                reply.append(DetokenizeMsg(uid=req.uid, next_token=next_token, finished=finished))
+                reply.append(
+                    DetokenizeMsg(
+                        uid=req.uid,
+                        next_token=next_token,
+                        finished=finished,
+                        tenant_id=tenant_id,
+                        model_path=unit.tenant_ctx.config.model_path,
+                    )
+                )
 
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:

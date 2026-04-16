@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple
 
 import torch
@@ -17,6 +17,7 @@ class ServerArgs(SchedulerConfig):
     server_port: int = 1919
     num_tokenizer: int = 0
     silent_output: bool = False
+    extra_models: List[str] = field(default_factory=list)
 
     @property
     def share_tokenizer(self) -> bool:
@@ -223,6 +224,13 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         help="Run the server in shell mode.",
     )
 
+    parser.add_argument(
+        "--extra-model",
+        action="append",
+        default=[],
+        help="Extra model for multi-tenant mode. Format: tenant_id=model_path. Can be specified multiple times.",
+    )
+
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
 
@@ -247,6 +255,8 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
             model_path = snapshot_download(model_path, ignore_patterns=ignore_patterns)
             kwargs["model_path"] = model_path
     del kwargs["model_source"]
+
+    kwargs["extra_models"] = kwargs.pop("extra_model", [])
 
     if (dtype_str := kwargs["dtype"]) == "auto":
         from minisgl.utils import cached_load_hf_config
