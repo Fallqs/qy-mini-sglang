@@ -135,7 +135,7 @@ python -m minisgl \
   --tp 4
 ```
 
-When multi-tenant mode is active, the OpenAI-compatible API accepts an extra field `model_path` (or `tenant_id`) to select which model handles the request. If omitted, the default model is used.
+When multi-tenant mode is active, the OpenAI-compatible API uses the standard `model` field to select the tenant (e.g., `"qwen"` or `"default"`). If the provided value does not match a registered tenant, the default model is used.
 
 Once the server is running, you can send requests using standard tools like `curl` or any OpenAI-compatible client.
 
