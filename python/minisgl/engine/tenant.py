@@ -83,7 +83,7 @@ class TenantContext:
         )
 
         # KV pool (allocator may cap num_pages based on global budget)
-        self.kv_pool: VirtualKVPool = pool_mgr.register_pool(config.tenant_id, config.model_config)
+        self.kv_pool: VirtualKVPool = pool_mgr.register_pool(config.tenant_id, config.model_config, config.page_size)
         self.kv_pool.allocate(num_pages)
         self.num_pages = self.kv_pool.num_pages
         num_tokens = self.num_pages * config.page_size

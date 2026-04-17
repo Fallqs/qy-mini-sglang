@@ -210,8 +210,10 @@ class VirtualKVPool:
 
         self.pool_mgr._ensure_layers(num_layers)
         total_fine_units = self.pool_mgr.fine_units_per_layer
-        # Ensure view covers all possible f.u. offsets (round up)
-        num_tokens_global = (total_fine_units + m_i - 1) // m_i
+        # Exact adaptive view: only cover the tokens we were actually granted.
+        # capped_num_pages * page_size * m_i <= max_pages * page_size * m_i
+        #                        <= total_fine_units, so this never exceeds the tensor.
+        num_tokens_global = self._num_pages * self.page_size
 
         k_buffers: List[torch.Tensor] = []
         v_buffers: List[torch.Tensor] = []
@@ -285,11 +287,12 @@ class KVPoolManager:
         self,
         tenant_id: str,
         model_config: ModelConfig,
+        page_size: int | None = None,
     ) -> VirtualKVPool:
         pool = VirtualKVPool(
             tenant_id=tenant_id,
             model_config=model_config,
-            page_size=self.page_size,
+            page_size=page_size if page_size is not None else self.page_size,
             dtype=self.dtype,
             allocator=self.allocator,
             pool_mgr=self,
