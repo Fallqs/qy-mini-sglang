@@ -9,17 +9,24 @@ from minisgl.kvcache import BaseCacheHandle, MatchResult, create_prefix_cache
 from minisgl.utils import div_ceil
 
 if TYPE_CHECKING:
+    from minisgl.engine.kv_pool import GlobalFineAllocator
     from .utils import PendingReq
 
 
 class CacheManager:
-    def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str):
-        # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
-        # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
-        device = page_table.device
-        self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * page_size
-        self.prefix_cache = create_prefix_cache(device=device, type=type)
-        self.device = device
+    def __init__(
+        self,
+        tenant_id: str,
+        num_pages: int,
+        page_size: int,
+        page_table: torch.Tensor,
+        type: str,
+        allocator: GlobalFineAllocator,
+    ):
+        self.tenant_id = tenant_id
+        self.allocator = allocator
+        self.prefix_cache = create_prefix_cache(device=page_table.device, type=type, page_size=page_size)
+        self.device = page_table.device
         self.num_pages = num_pages
         self.page_table = page_table
         self.page_size = page_size
@@ -31,7 +38,7 @@ class CacheManager:
 
     @property
     def available_size(self) -> int:
-        return self.prefix_cache.size_info.evictable_size + len(self.free_slots) * self.page_size
+        return self.prefix_cache.size_info.evictable_size + self.allocator.available_pages(self.tenant_id) * self.page_size
 
     def lock(self, handle: BaseCacheHandle) -> None:
         self.prefix_cache.lock_handle(handle, unlock=False)
@@ -78,43 +85,57 @@ class CacheManager:
             req.cache_handle = new_handle
             self.lock(new_handle)
 
-    def check_integrity(self) -> None:
+    def check_integrity(self, strict: bool = True) -> None:
         self.prefix_cache.check_integrity()
         cache_pages = self.prefix_cache.size_info.total_size // self.page_size
-        if len(self.free_slots) + cache_pages != self.num_pages:
+        free_pages = self.allocator.available_pages(self.tenant_id)
+        # In multi-tenant mode other tenants may borrow pages from our segment,
+        # so free_pages + cache_pages can be < num_pages. Only enforce exact
+        # equality in single-tenant mode; otherwise just guard against overflow.
+        if strict:
+            if free_pages + cache_pages != self.num_pages:
+                raise RuntimeError(
+                    "CacheManager integrity check failed:"
+                    f" free_pages({free_pages}) +"
+                    f" cache_pages({cache_pages}) != num_pages({self.num_pages})"
+                )
+        elif free_pages + cache_pages > self.num_pages:
             raise RuntimeError(
                 "CacheManager integrity check failed:"
-                f" free_pages({len(self.free_slots)}) +"
-                f" cache_pages({cache_pages}) != num_pages({self.num_pages})"
+                f" free_pages({free_pages}) +"
+                f" cache_pages({cache_pages}) > num_pages({self.num_pages})"
             )
-        if self.page_size > 1:
-            assert torch.all(self.free_slots % self.page_size == 0)
 
     @contextmanager
     def lazy_free_region(self):
-        def lazy_free(indices: torch.Tensor) -> None:
-            lazy_free_list.append(indices[:: self.page_size])
+        lazy_indices_list: List[torch.Tensor] = []
 
-        lazy_free_list: List[torch.Tensor] = []
+        def lazy_free(indices: torch.Tensor) -> None:
+            if len(indices) > 0:
+                lazy_indices_list.append(indices)
+
         try:
             self._free = lazy_free
             yield
         finally:
             del self._free
-            self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
+            if lazy_indices_list:
+                all_indices = torch.cat(lazy_indices_list)
+                self.allocator.free(self.tenant_id, all_indices)
 
     def _allocate(self, needed_pages: int) -> torch.Tensor:
-        if needed_pages > (free_pages := len(self.free_slots)):
+        free_pages = self.allocator.available_pages(self.tenant_id)
+        if needed_pages > free_pages:
             evicted = self.prefix_cache.evict((needed_pages - free_pages) * self.page_size)
-            self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
-            assert len(self.free_slots) >= needed_pages, "Eviction did not free enough space."
-        allocated = self.free_slots[:needed_pages]
-        self.free_slots = self.free_slots[needed_pages:]
-        return allocated
+            self.allocator.free(self.tenant_id, evicted)
+            free_pages = self.allocator.available_pages(self.tenant_id)
+            assert free_pages >= needed_pages, "Eviction did not free enough space."
+        tokens = self.allocator.allocate(self.tenant_id, needed_pages)
+        return tokens[::self.page_size]
 
     def _free(self, indices: torch.Tensor) -> None:
         if len(indices) > 0:
-            self.free_slots = torch.cat([self.free_slots, indices[:: self.page_size]])
+            self.allocator.free(self.tenant_id, indices)
 
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:

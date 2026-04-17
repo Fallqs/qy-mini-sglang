@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
 import torch
-from minisgl.core import Batch, Req, get_global_ctx
+from minisgl.core import Batch, Req
 from minisgl.distributed import get_tp_info
 from minisgl.utils import init_logger
 from tqdm import tqdm
@@ -88,6 +88,7 @@ class GraphRunner:
         max_seq_len: int,
         vocab_size: int,
         dummy_req: Req,
+        ctx=None,
     ) -> None:
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
@@ -100,9 +101,9 @@ class GraphRunner:
         self.dummy_req = dummy_req
         self.stream = stream
         self.device = device
-        self._capture_graphs(max_seq_len, vocab_size, model)
+        self._capture_graphs(max_seq_len, vocab_size, model, ctx)
 
-    def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
+    def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel, ctx=None):
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
@@ -135,10 +136,18 @@ class GraphRunner:
             batch.padded_reqs = batch.reqs
             self.attn_backend.prepare_for_capture(batch)
             self.buffer.set_batch(batch)
-            with get_global_ctx().forward_batch(batch):
-                self.buffer.logits[:bs] = model.forward()
-                with torch.cuda.graph(graph, pool=pool, stream=self.stream):
+            if ctx is not None:
+                from minisgl.core import pop_global_ctx, push_global_ctx
+                push_global_ctx(ctx)
+            try:
+                forward_ctx = ctx.forward_batch(batch) if ctx is not None else get_global_ctx().forward_batch(batch)
+                with forward_ctx:
                     self.buffer.logits[:bs] = model.forward()
+                    with torch.cuda.graph(graph, pool=pool, stream=self.stream):
+                        self.buffer.logits[:bs] = model.forward()
+            finally:
+                if ctx is not None:
+                    pop_global_ctx()
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
             self.graph_map[bs] = graph

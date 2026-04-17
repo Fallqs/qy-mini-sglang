@@ -19,6 +19,13 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
 
     with torch.inference_mode():
         scheduler = Scheduler(args)
+        from dataclasses import replace
+
+        for spec in args.extra_models:
+            tenant_id, model_path = spec.split("=", 1)
+            tenant_cfg = replace(args, model_path=model_path, extra_models=[])
+            scheduler.add_tenant(tenant_id, tenant_cfg)
+
         scheduler.sync_all_ranks()
 
         if args.tp_info.is_primary():

@@ -32,7 +32,8 @@ class DecodeManager:
     def schedule_next_batch(self) -> Batch | None:
         if not self.runnable:
             return None
-        return Batch(reqs=list(self.running_reqs), phase="decode")
+        # Sort by uid so all TP ranks agree on batch order
+        return Batch(reqs=sorted(self.running_reqs, key=lambda r: r.uid), phase="decode")
 
     @property
     def runnable(self) -> bool:

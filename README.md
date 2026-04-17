@@ -20,6 +20,7 @@ Mini-SGLang is a compact implementation of [SGLang](https://github.com/sgl-proje
   - **Overlap Scheduling**: Hides CPU scheduling overhead with GPU computation.
   - **Tensor Parallelism**: Scales inference across multiple GPUs.
   - **Optimized Kernels**: Integrates **FlashAttention** and **FlashInfer** for maximum efficiency.
+  - **Multi-Tenant Engine**: Serve multiple independent models simultaneously on the same GPUs with a shared KV memory pool (tensor-parallelism supported).
   - ...
 
 ## 🚀 Quick Start
@@ -122,6 +123,20 @@ python -m minisgl --model "Qwen/Qwen3-0.6B"
 python -m minisgl --model "meta-llama/Llama-3.1-70B-Instruct" --tp 4 --port 30000
 ```
 
+#### Multi-Tenant Serving
+
+Serve multiple models on the same GPU cluster by registering additional "tenants" with `--extra-model`. Each tenant gets its own independent KV cache while sharing the underlying GPU memory pool.
+
+```bash
+# Serve Llama-3.2-1B (default) and Qwen3-8B on 4 GPUs
+python -m minisgl \
+  --model "meta-llama/Llama-3.2-1B-Instruct" \
+  --extra-model qwen="Qwen/Qwen3-8B" \
+  --tp 4
+```
+
+When multi-tenant mode is active, the OpenAI-compatible API uses the standard `model` field to select the tenant (e.g., `"qwen"` or `"default"`). If the provided value does not match a registered tenant, the default model is used.
+
 Once the server is running, you can send requests using standard tools like `curl` or any OpenAI-compatible client.
 
 ### 4. Interactive Shell
@@ -129,12 +144,25 @@ Once the server is running, you can send requests using standard tools like `cur
 Chat with your model directly in the terminal by adding the `--shell` flag.
 
 ```bash
-python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
+python -u -m minisgl --model "Qwen/Qwen3-0.6B" --shell
 ```
 
 ![shell-example](https://lmsys.org/images/blog/minisgl/shell.png)
 
-You can also use `/reset` to clear the chat history.
+You can also use `/reset` to clear the chat history, or switch between loaded models with `/model:<name>` when running in multi-tenant mode.
+
+```bash
+# Interactive multi-tenant shell
+python -u -m minisgl \
+  --model "meta-llama/Llama-3.2-1B-Instruct" \
+  --extra-model qwen="Qwen/Qwen3-8B" \
+  --shell
+
+# Inside the shell:
+#   [default] $ Hello!
+#   /model:qwen
+#   [qwen] $ 你好!
+```
 
 ## Benchmark
 

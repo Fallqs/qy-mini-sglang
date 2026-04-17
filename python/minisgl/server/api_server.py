@@ -106,12 +106,21 @@ class FrontendManager:
     initialized: bool = False
     ack_map: Dict[int, List[UserReply]] = field(default_factory=dict)
     event_map: Dict[int, asyncio.Event] = field(default_factory=dict)
+    uid_tenant_map: Dict[int, str] = field(default_factory=dict)
 
-    def new_user(self) -> int:
+    def get_model_path(self, tenant_id: str) -> str:
+        for spec in self.config.extra_models:
+            tid, mpath = spec.split("=", 1)
+            if tid == tenant_id:
+                return mpath
+        return self.config.model_path
+
+    def new_user(self, tenant_id: str = "default") -> int:
         uid = self.uid_counter
         self.uid_counter += 1
         self.ack_map[uid] = []
         self.event_map[uid] = asyncio.Event()
+        self.uid_tenant_map[uid] = tenant_id
         return uid
 
     async def listen(self):
@@ -206,8 +215,9 @@ class FrontendManager:
             del self.ack_map[uid]
         if uid in self.event_map:
             del self.event_map[uid]
-        logger.warning("Aborting request for user %s", uid)
-        await self.send_one(AbortMsg(uid=uid))
+        tenant_id = self.uid_tenant_map.pop(uid, "default")
+        logger.warning("Aborting request for user %s (tenant=%s)", uid, tenant_id)
+        await self.send_one(AbortMsg(uid=uid, tenant_id=tenant_id))
 
     def shutdown(self):
         self.send_tokenizer.stop()
@@ -230,7 +240,9 @@ app = FastAPI(title="MiniSGL API Server", version="0.0.1", lifespan=lifespan)
 async def generate(req: GenerateRequest, request: Request):
     logger.debug("Received generate request %s", req)
     state = get_global_state()
-    uid = state.new_user()
+    tenant_id = "default"
+    model_path = state.get_model_path(tenant_id)
+    uid = state.new_user(tenant_id)
     await state.send_one(
         TokenizeMsg(
             uid=uid,
@@ -239,6 +251,8 @@ async def generate(req: GenerateRequest, request: Request):
                 ignore_eos=req.ignore_eos,
                 max_tokens=req.max_tokens,
             ),
+            tenant_id=tenant_id,
+            model_path=model_path,
         )
     )
 
@@ -262,8 +276,9 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
         assert req.prompt is not None, "Either 'messages' or 'prompt' must be provided"
         prompt = req.prompt
 
-    # TODO: support more sampling parameters
-    uid = state.new_user()
+    tenant_id = req.model or "default"
+    model_path = state.get_model_path(tenant_id)
+    uid = state.new_user(tenant_id)
     await state.send_one(
         TokenizeMsg(
             uid=uid,
@@ -275,6 +290,8 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
                 top_k=req.top_k,
                 top_p=req.top_p,
             ),
+            tenant_id=tenant_id,
+            model_path=model_path,
         )
     )
 
@@ -287,16 +304,19 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
 @app.get("/v1/models")
 async def available_models():
     state = get_global_state()
-    return ModelList(data=[ModelCard(id=state.config.model_path, root=state.config.model_path)])
+    models = {"default": state.config.model_path}
+    for spec in state.config.extra_models:
+        tenant_id, model_path = spec.split("=", 1)
+        models[tenant_id] = model_path
+    return ModelList(data=[ModelCard(id=k, root=v) for k, v in models.items()])
 
 
-async def shell_completion(req: OpenAICompletionRequest):
+async def shell_completion(req: OpenAICompletionRequest, tenant_id: str = "default", model_path: str | None = None):
     state = get_global_state()
     assert req.messages is not None, "Shell completion only supports chat-completions"
     prompt = [msg.model_dump() for msg in req.messages]
 
-    # TODO: support more sampling parameters
-    uid = state.new_user()
+    uid = state.new_user(tenant_id)
     await state.send_one(
         TokenizeMsg(
             uid=uid,
@@ -308,6 +328,8 @@ async def shell_completion(req: OpenAICompletionRequest):
                 top_k=req.top_k,
                 top_p=req.top_p,
             ),
+            tenant_id=tenant_id,
+            model_path=model_path,
         )
     )
 
@@ -338,15 +360,22 @@ async def async_input(prompt=""):
 
 
 async def shell():
-    commands = ["/exit", "/reset"]
+    state = get_global_state()
+    models = {"default": state.config.model_path}
+    for spec in state.config.extra_models:
+        tenant_id, model_path = spec.split("=", 1)
+        models[tenant_id] = model_path
+
+    commands = ["/exit", "/reset", "/models"] + [f"/model:{k}" for k in models.keys()]
     completer = WordCompleter(commands)
-    session = PromptSession("$ ", completer=completer)
+    current_model = "default"
+    session = PromptSession(completer=completer)
 
     try:
         history: List[Tuple[str, str]] = []
         while True:
             need_stop = False
-            cmd = (await session.prompt_async()).strip()
+            cmd = (await session.prompt_async(f"[{current_model}] $ ")).strip()
             if cmd == "":
                 continue
             if cmd.startswith("/"):
@@ -355,14 +384,25 @@ async def shell():
                 if cmd == "/reset":
                     history = []
                     continue
+                if cmd == "/models":
+                    for name, path in models.items():
+                        marker = " *" if name == current_model else ""
+                        print(f"  {name}: {path}{marker}")
+                    continue
+                if cmd.startswith("/model:"):
+                    name = cmd[len("/model:"):].strip()
+                    if name not in models:
+                        print(f"Unknown model '{name}'. Available: {', '.join(models.keys())}")
+                        continue
+                    current_model = name
+                    continue
                 raise ValueError(f"Unknown command: {cmd}")
             history_messages: List[Message] = []
             for user_msg, assistant_msg in history:
                 history_messages.append(Message(role="user", content=user_msg))
                 history_messages.append(Message(role="assistant", content=assistant_msg))
-            # send to server
             req = OpenAICompletionRequest(
-                model="",
+                model=current_model,
                 messages=history_messages + [Message(role="user", content=cmd)],
                 max_tokens=ENV.SHELL_MAX_TOKENS.value,
                 top_k=ENV.SHELL_TOP_K.value,
@@ -371,7 +411,7 @@ async def shell():
                 stream=True,
             )
             cur_msg = ""
-            async for chunk in (await shell_completion(req)).body_iterator:
+            async for chunk in (await shell_completion(req, tenant_id=current_model, model_path=models[current_model])).body_iterator:
                 if need_stop:
                     break
                 msg = chunk.decode()  # type: ignore

@@ -29,6 +29,8 @@ class DetokenizeMsg(BaseTokenizerMsg):
     uid: int
     next_token: int
     finished: bool
+    tenant_id: str = "default"
+    model_path: str | None = None
 
 
 @dataclass
@@ -36,8 +38,11 @@ class TokenizeMsg(BaseTokenizerMsg):
     uid: int
     text: str | List[Dict[str, str]]
     sampling_params: SamplingParams
+    tenant_id: str = "default"
+    model_path: str | None = None
 
 
 @dataclass
 class AbortMsg(BaseTokenizerMsg):
     uid: int
+    tenant_id: str = "default"

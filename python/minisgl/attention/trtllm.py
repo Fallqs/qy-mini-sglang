@@ -37,6 +37,7 @@ class TensorRTLLMBackend(BaseAttnBackend):
         ctx = get_global_ctx()
         self.config = config
         self.kvcache = ctx.kv_cache
+        self.page_table = ctx.page_table
         self.page_size = ctx.page_size
         self.capture: TRTLLMCaptureData | None = None
         self.max_graph_bs = 0
@@ -113,9 +114,8 @@ class TensorRTLLMBackend(BaseAttnBackend):
             cu_seqlens_q = torch.tensor([0] + seqlens_q, **CPU_KWARGS).cumsum_(dim=0)
             cu_seqlens_q = cu_seqlens_q.to(self.kvcache.device, non_blocking=True)
 
-        page_table = get_global_ctx().page_table
         new_page_table = torch.stack(  # NOTE: global page table treat page_size = 1, we need slice
-            [page_table[req.table_idx, : max_seqlen_k : self.page_size] for req in reqs]
+            [self.page_table[req.table_idx, : max_seqlen_k : self.page_size] for req in reqs]
         )
         if self.page_size > 1:
             new_page_table.div_(self.page_size, rounding_mode="floor")
