@@ -196,8 +196,13 @@ class HierarchicalCacheManager(CacheManager):
             return MatchResult(cuda_handle=gpu_handle)
 
         total_len = gpu_handle.cached_len + loaded_len
+        gpu_indices = (
+            gpu_handle.get_matched_indices()
+            if gpu_handle.cached_len > 0
+            else torch.empty(0, dtype=torch.int32, device=self.device)
+        )
         combined_indices = torch.cat([
-            gpu_handle.get_matched_indices(),
+            gpu_indices,
             self._fresh_indices[:loaded_len],
         ])
         combined_handle = HierarchicalCacheHandle(
@@ -237,8 +242,13 @@ class HierarchicalCacheManager(CacheManager):
             return None
 
         total_len = gpu_handle.cached_len + loaded_len
+        gpu_indices = (
+            gpu_handle.get_matched_indices()
+            if gpu_handle.cached_len > 0
+            else torch.empty(0, dtype=torch.int32, device=self.device)
+        )
         combined_indices = torch.cat([
-            gpu_handle.get_matched_indices(),
+            gpu_indices,
             self._fresh_indices[:loaded_len],
         ])
         # Update page table for the newly loaded portion.

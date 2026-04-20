@@ -208,6 +208,27 @@ python3 -m sglang.launch_server --model "Qwen/Qwen3-32B" --tp 4 \
 
 ![online](https://lmsys.org/images/blog/minisgl/online.png)
 
+## 📝 Known Issues & TODO
+
+### MoonCake Transfer Engine `libffi` conflict
+
+On some Linux distributions the system `libp11-kit.so.0` requires `LIBFFI_BASE_7.0` symbols, but a conda-installed `libffi.so.8` can shadow the system `libffi.so.7` and cause an `ImportError` when loading `mooncake.store`:
+
+```
+ImportError: /lib/x86_64-linux-gnu/libp11-kit.so.0: undefined symbol: ffi_type_pointer, version LIBFFI_BASE_7.0
+```
+
+**Workaround**: Preload the system `libffi.so.7` before running Python:
+
+```bash
+export LD_PRELOAD=/lib/x86_64-linux-gnu/libffi.so.7
+python -m minisgl --model "Qwen/Qwen3-0.6B"
+```
+
+### Real MoonCake Store requires RDMA-capable environment
+
+`mooncake-transfer-engine` is installed and importable, but `MooncakeDistributedStore.setup()` will hang during transfer-engine initialization on machines without RDMA/NIC hardware (even when `protocol='tcp'` is configured). The integration test suite (`tests/core/test_mooncake_integration.py`) validates the Mini-SGLang → MoonCake orchestration layer using a mocked store backend and auto-skips the real-setup smoke tests when RDMA is unavailable.
+
 ## 📚 Learn More
 
 - **[Detailed Features](./docs/features.md)**: Explore all available features and command-line arguments.

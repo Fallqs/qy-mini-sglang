@@ -163,11 +163,11 @@ class MoonCakeKVBackend(BaseSpillBackend):
         matched = 0
         for chunk_idx, chunk_tokens in self._iter_chunks(token_ids):
             layer_key = self._chunk_key(0, chunk_idx, chunk_tokens)
-            if not self._store.is_exist(layer_key):
+            if self._store.is_exist(layer_key) <= 0:
                 break
             # Verify all layers exist for this chunk
             all_exist = all(
-                self._store.is_exist(self._chunk_key(layer_id, chunk_idx, chunk_tokens))
+                self._store.is_exist(self._chunk_key(layer_id, chunk_idx, chunk_tokens)) > 0
                 for layer_id in range(self._num_layers)
             )
             if not all_exist:
@@ -198,7 +198,7 @@ class MoonCakeKVBackend(BaseSpillBackend):
                     raise RuntimeError(f"MoonCake key missing during load: {key}")
                 k_cpu, v_cpu = _deserialize_kv(raw, dtype)
                 chunk_len = len(chunk_tokens)
-                idx = gpu_indices[offset : offset + chunk_len].to(device)
+                idx = gpu_indices[offset : offset + chunk_len].long().to(device)
                 k_dst.index_copy_(0, idx, k_cpu.to(device))
                 v_dst.index_copy_(0, idx, v_cpu.to(device))
                 offset += chunk_len
@@ -216,7 +216,7 @@ class MoonCakeKVBackend(BaseSpillBackend):
             offset = 0
             for chunk_idx, chunk_tokens in self._iter_chunks(token_ids):
                 chunk_len = len(chunk_tokens)
-                idx = gpu_indices[offset : offset + chunk_len].to(device)
+                idx = gpu_indices[offset : offset + chunk_len].long().to(device)
                 k_cpu = k_src.index_select(0, idx).cpu()
                 v_cpu = v_src.index_select(0, idx).cpu()
                 key = self._chunk_key(layer_id, chunk_idx, chunk_tokens)
@@ -241,15 +241,23 @@ _HEADER = struct.Struct("<B Q")  # version, num_bytes
 def _serialize_kv(k: torch.Tensor, v: torch.Tensor) -> bytes:
     """Serialize a (K, V) pair into a compact byte blob."""
     buf = io.BytesIO()
-    k_np = k.cpu().contiguous().numpy()
-    v_np = v.cpu().contiguous().numpy()
+    # bfloat16 is not directly convertible to numpy; view as uint16
+    if k.dtype == torch.bfloat16:
+        k_np = k.cpu().contiguous().view(torch.uint16).numpy()
+        v_np = v.cpu().contiguous().view(torch.uint16).numpy()
+    else:
+        k_np = k.cpu().contiguous().numpy()
+        v_np = v.cpu().contiguous().numpy()
     k_bytes = k_np.tobytes()
     v_bytes = v_np.tobytes()
     buf.write(struct.pack("<B", _FMT_VERSION))
     buf.write(struct.pack("<QQ", len(k_bytes), len(v_bytes)))
     buf.write(k_bytes)
     buf.write(v_bytes)
-    buf.write(struct.pack("<QQ", k_np.shape[0], k_np.shape[1]))  # spare shape info
+    # Store full shape for faithful reconstruction
+    buf.write(struct.pack("<Q", len(k_np.shape)))
+    for dim in k_np.shape:
+        buf.write(struct.pack("<Q", dim))
     return buf.getvalue()
 
 
@@ -261,11 +269,16 @@ def _deserialize_kv(data: bytes, dtype: torch.dtype) -> tuple[torch.Tensor, torc
     k_len, v_len = struct.unpack("<QQ", buf.read(16))
     k_bytes = buf.read(k_len)
     v_bytes = buf.read(v_len)
-    # shape is stored as two uint64s after payload for forward compat
-    buf.read(16)
-    # Reconstruct tensors.  We know the exact element count from length // itemsize.
-    k = torch.frombuffer(k_bytes, dtype=dtype).clone()
-    v = torch.frombuffer(v_bytes, dtype=dtype).clone()
+    # Reconstruct shape
+    ndim = struct.unpack("<Q", buf.read(8))[0]
+    shape = tuple(struct.unpack("<Q", buf.read(8))[0] for _ in range(ndim))
+    # Reconstruct tensors
+    if dtype == torch.bfloat16:
+        k = torch.frombuffer(bytearray(k_bytes), dtype=torch.uint16).view(torch.bfloat16).clone().reshape(shape)
+        v = torch.frombuffer(bytearray(v_bytes), dtype=torch.uint16).view(torch.bfloat16).clone().reshape(shape)
+    else:
+        k = torch.frombuffer(bytearray(k_bytes), dtype=dtype).clone().reshape(shape)
+        v = torch.frombuffer(bytearray(v_bytes), dtype=dtype).clone().reshape(shape)
     return k, v
 
 
