@@ -225,9 +225,22 @@ export LD_PRELOAD=/lib/x86_64-linux-gnu/libffi.so.7
 python -m minisgl --model "Qwen/Qwen3-0.6B"
 ```
 
-### Real MoonCake Store requires RDMA-capable environment
+### MoonCake TCP mode hang with HTTP metadata server
 
-`mooncake-transfer-engine` is installed and importable, but `MooncakeDistributedStore.setup()` will hang during transfer-engine initialization on machines without RDMA/NIC hardware (even when `protocol='tcp'` is configured). The integration test suite (`tests/core/test_mooncake_integration.py`) validates the Mini-SGLang → MoonCake orchestration layer using a mocked store backend and auto-skips the real-setup smoke tests when RDMA is unavailable.
+`mooncake-transfer-engine`'s transfer engine defaults to an **etcd** metadata plugin. If the `metadata_server` config points to an HTTP/1.1 endpoint (such as MoonCake's own HTTP metadata server), the etcd gRPC client fails to parse the response and retries with a 5-second deadline. Combined with MoonCake's internal retry loop, `MooncakeDistributedStore.setup()` appears to hang indefinitely — **even when `protocol='tcp'` is configured and RDMA hardware is absent or present**.
+
+**Fix**: For TCP-only deployments, set `metadata_server` to `"P2PHANDSHAKE"` (or the environment variable `MOONCAKE_TE_META_DATA_SERVER=P2PHANDSHAKE`). This bypasses etcd and uses peer-to-peer handshake for metadata exchange. Also ensure the dict key is `master_server_addr`, not `master_server_address`.
+
+```python
+config = {
+    "local_hostname": "127.0.0.1",
+    "metadata_server": "P2PHANDSHAKE",
+    "protocol": "tcp",
+    "master_server_addr": "127.0.0.1:50051",
+}
+```
+
+The integration test suite (`tests/core/test_mooncake_integration.py`) validates the Mini-SGLang → MoonCake orchestration layer using a mocked store backend and auto-skips the real-setup smoke tests when the master is unreachable.
 
 ## 📚 Learn More
 

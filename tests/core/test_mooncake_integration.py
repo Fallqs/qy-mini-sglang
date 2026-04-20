@@ -621,8 +621,6 @@ class TestRealMoonCakeSetupSmoke:
         master_cmd = [
             "/home/skl/anaconda3/envs/qysgl/bin/mooncake_master",
             f"--rpc_port={rpc_port}",
-            "--enable_http_metadata_server",
-            f"--http_metadata_server_port={meta_port}",
             f"--metrics_port={metrics_port}",
             "--logtostderr",
         ]
@@ -640,15 +638,16 @@ class TestRealMoonCakeSetupSmoke:
             time.sleep(1.5)  # give master time to bind
             config = {
                 "local_hostname": "127.0.0.1",
-                "metadata_server": f"127.0.0.1:{meta_port}",
+                "metadata_server": "P2PHANDSHAKE",
                 "global_segment_size": 64 * 1024 * 1024,
                 "local_buffer_size": 16 * 1024 * 1024,
                 "protocol": "tcp",
                 "rdma_devices": "",
-                "master_server_address": f"127.0.0.1:{rpc_port}",
+                "master_server_addr": f"127.0.0.1:{rpc_port}",
             }
-            # setup() can hang on IB discovery; run in a child process so we
-            # can enforce a hard timeout without deadlocking pytest.
+            # setup() may retry indefinitely when it cannot reach the metadata
+            # server.  Run in a child process so we can enforce a hard timeout
+            # without deadlocking pytest.
             import multiprocessing
             q = multiprocessing.Queue()
 
@@ -671,7 +670,7 @@ class TestRealMoonCakeSetupSmoke:
                     os.kill(p.pid, signal.SIGKILL)
                     p.join(timeout=2)
                 pytest.skip(
-                    "Real MoonCake store.setup() timed out (likely no RDMA/NIC hardware)"
+                    "Real MoonCake store.setup() timed out (check mooncake_master is reachable)"
                 )
 
             if not q.empty():

@@ -169,7 +169,7 @@ python -m minisgl \
   --hicache-backend mooncake \
   --hicache-chunk-size 256 \
   --hicache-max-inflight 4 \
-  --hicache-config-json '{"local_hostname":"localhost","metadata_server":"http://localhost:8080/metadata","master_server_address":"localhost:50051","protocol":"tcp","global_segment_size":"4gb"}'
+  --hicache-config-json '{"local_hostname":"localhost","metadata_server":"P2PHANDSHAKE","master_server_addr":"localhost:50051","protocol":"tcp","global_segment_size":"4gb"}'
 ```
 
 ### Config Fields (SchedulerConfig)
