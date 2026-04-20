@@ -61,7 +61,7 @@ class InsertResult(NamedTuple):
 
 class MatchResult(NamedTuple):
     cuda_handle: BaseCacheHandle
-    # TODO: support HiCache
+    spilled_handle: BaseCacheHandle | None = None  # tokens residing in host/disk/remote tier
 
 
 class BasePrefixCache(ABC):

@@ -17,6 +17,13 @@ class SchedulerConfig(EngineConfig):
     cache_type: str = "radix"
     offline_mode: bool = False
 
+    # hierarchical cache config
+    enable_hierarchical_cache: bool = False
+    hicache_backend: str = "noop"  # "noop" | "mooncake"
+    hicache_backend_config: dict | None = None
+    hicache_chunk_size: int = 256
+    hicache_max_inflight: int = 4
+
     # networking config
     _unique_suffix: str = field(default_factory=_get_pid_suffix)
 

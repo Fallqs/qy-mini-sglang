@@ -212,6 +212,41 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
+        "--enable-hierarchical-cache",
+        action="store_true",
+        help="Enable hierarchical KV cache (GPU -> CPU/SSD via MoonCake Store).",
+    )
+
+    parser.add_argument(
+        "--hicache-backend",
+        type=str,
+        default=ServerArgs.hicache_backend,
+        choices=["noop", "mooncake"],
+        help="Backend for the hierarchical cache tier.",
+    )
+
+    parser.add_argument(
+        "--hicache-chunk-size",
+        type=int,
+        default=ServerArgs.hicache_chunk_size,
+        help="Chunk size (in tokens) for KV cache offloading.",
+    )
+
+    parser.add_argument(
+        "--hicache-max-inflight",
+        type=int,
+        default=ServerArgs.hicache_max_inflight,
+        help="Maximum number of concurrent async offload operations.",
+    )
+
+    parser.add_argument(
+        "--hicache-config-json",
+        type=str,
+        default=None,
+        help='JSON string with backend-specific config (e.g. MoonCake setup kwargs).',
+    )
+
+    parser.add_argument(
         "--moe-backend",
         default=ServerArgs.moe_backend,
         choices=["auto"] + SUPPORTED_MOE_BACKENDS.supported_names(),
@@ -257,6 +292,12 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     del kwargs["model_source"]
 
     kwargs["extra_models"] = kwargs.pop("extra_model", [])
+
+    # Parse hierarchical cache backend JSON config
+    hicache_json = kwargs.pop("hicache_config_json", None)
+    if hicache_json is not None:
+        import json
+        kwargs["hicache_backend_config"] = json.loads(hicache_json)
 
     if (dtype_str := kwargs["dtype"]) == "auto":
         from minisgl.utils import cached_load_hf_config

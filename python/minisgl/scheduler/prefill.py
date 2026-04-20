@@ -40,8 +40,8 @@ class PrefillAdder:
         if self.table_manager.available_size == 0:
             return None
 
-        # TODO: consider host cache match case
-        handle = self.cache_manager.match_req(req).cuda_handle
+        match_result = self.cache_manager.match_req(req)
+        handle = match_result.cuda_handle
         cached_len = handle.cached_len
         # TODO: better estimate policy
         extend_len = req.input_len - cached_len
@@ -59,6 +59,12 @@ class PrefillAdder:
             page_entry = self.table_manager.page_table[table_idx][:cached_len]
             device_ids.copy_(req.input_ids[:cached_len].pin_memory(), non_blocking=True)
             page_entry.copy_(handle.get_matched_indices())
+
+        # Try to expand the prefix from spilled (MoonCake) storage.
+        if hasattr(self.cache_manager, "try_expand_from_spilled"):
+            expanded = self.cache_manager.try_expand_from_spilled(req, handle, table_idx)
+            if expanded is not None:
+                handle, cached_len = expanded
 
         return handle, table_idx
 

@@ -6,6 +6,13 @@ import torch
 from minisgl.core import Batch, Req
 from minisgl.engine import MultiTenantEngine
 from minisgl.env import ENV
+from minisgl.kvcache import (
+    AsyncTransferQueue,
+    BaseSpillBackend,
+    build_model_fingerprint,
+    mooncake_available,
+)
+from minisgl.kvcache.mooncake_backend import MoonCakeKVBackend, NoopSpillBackend
 from minisgl.message import (
     AbortBackendMsg,
     BaseBackendMsg,
@@ -16,7 +23,7 @@ from minisgl.message import (
 )
 from minisgl.utils import init_logger, load_tokenizer
 
-from .cache import CacheManager
+from .cache import CacheManager, HierarchicalCacheManager
 from .config import SchedulerConfig
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
@@ -51,14 +58,31 @@ class TenantUnit:
         self.tenant_id = tenant_id
         self.tenant_ctx = tenant_ctx
         self.table_manager = TableManager(config.max_running_req, tenant_ctx.page_table)
-        self.cache_manager = CacheManager(
-            tenant_id=tenant_id,
-            num_pages=tenant_ctx.num_pages,
-            page_size=config.page_size,
-            page_table=tenant_ctx.page_table,
-            type=config.cache_type,
-            allocator=tenant_ctx.kv_pool.pool_mgr.allocator,
-        )
+
+        # Build hierarchical cache backend if requested.
+        spill_backend, async_queue = _build_spill_backend(tenant_ctx, config)
+
+        if spill_backend is not None:
+            self.cache_manager: CacheManager = HierarchicalCacheManager(
+                tenant_id=tenant_id,
+                num_pages=tenant_ctx.num_pages,
+                page_size=config.page_size,
+                page_table=tenant_ctx.page_table,
+                allocator=tenant_ctx.kv_pool.pool_mgr.allocator,
+                kv_pool=tenant_ctx.kv_pool.pool,
+                spill_backend=spill_backend,
+                async_queue=async_queue,
+            )
+        else:
+            self.cache_manager = CacheManager(
+                tenant_id=tenant_id,
+                num_pages=tenant_ctx.num_pages,
+                page_size=config.page_size,
+                page_table=tenant_ctx.page_table,
+                type=config.cache_type,
+                allocator=tenant_ctx.kv_pool.pool_mgr.allocator,
+            )
+
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(
             self.cache_manager, self.table_manager, self.decode_manager
@@ -204,6 +228,9 @@ class Scheduler(SchedulerIOMixin):
                     new_finished_reqs.add(req)
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
                     unit.cache_manager.cache_req(req, finished=False)
+                    # Asynchronously offload newly-computed KV to spill backend.
+                    if hasattr(unit.cache_manager, "maybe_offload"):
+                        unit.cache_manager.maybe_offload(req)
 
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)
@@ -308,6 +335,44 @@ class Scheduler(SchedulerIOMixin):
         unit.table_manager.token_pool[output_mapping] = forward_output.next_tokens_gpu
         unit.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
+
+
+def _build_spill_backend(tenant_ctx, config: SchedulerConfig):
+    """
+    Construct a spill backend and async queue for hierarchical caching.
+    Returns ``(spill_backend, async_queue)`` or ``(None, None)`` when
+    hierarchical caching is disabled.
+    """
+    if not getattr(config, "enable_hierarchical_cache", False):
+        return None, None
+
+    from minisgl.distributed import get_tp_info
+
+    tp_info = get_tp_info()
+    model_fp = build_model_fingerprint(
+        model_config=tenant_ctx.config.model_config,
+        tp_size=tp_info.size,
+        tp_rank=tp_info.rank,
+        dtype=tenant_ctx.config.dtype,
+    )
+
+    if getattr(config, "hicache_backend", "noop") == "mooncake" and mooncake_available():
+        store = MoonCakeKVBackend(
+            model_config=tenant_ctx.config.model_config,
+            page_size=config.page_size,
+            model_fingerprint=model_fp,
+            chunk_size=getattr(config, "hicache_chunk_size", 256),
+        )
+        # Setup from CLI / config.
+        setup_kwargs = getattr(config, "hicache_backend_config", {}) or {}
+        if setup_kwargs:
+            store.setup(**setup_kwargs)
+        backend: BaseSpillBackend = store
+    else:
+        backend = NoopSpillBackend()
+
+    queue = AsyncTransferQueue(max_inflight=getattr(config, "hicache_max_inflight", 4))
+    return backend, queue
 
 
 def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:
