@@ -18,6 +18,46 @@ python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
 
 To scale performance across multiple GPUs, Mini-SGLang supports Tensor Parallelism (TP). You can enable distributed serving by specifying the number of GPUs with the `--tp n` argument, where `n` is the degree of parallelism.
 
+## Parameter Offloading
+
+Mini-SGLang supports tenant-level parameter offloading in multi-tenant deployments. When enabled, inactive tenant models can be deactivated and their weights moved back to CPU pinned memory. They are reactivated on demand when a new request for that tenant arrives.
+
+Relevant arguments:
+
+- `--enable-parameter-offloading`: Enable tenant-level model offloading.
+- `--offload-idle-seconds n`: Offload inactive tenants after `n` seconds of idle time.
+- `--max-active-models n`: Keep at most `n` tenant models active on GPU. Use `0` to disable the limit.
+
+This feature is especially useful when multiple tenants share one engine and only a subset of them should remain resident on GPU simultaneously.
+
+## Layer Offloading
+
+Mini-SGLang also supports a lighter-weight block-level parameter offloading mode for decoder-only models with a standard `model.layers` layout. In this mode, the runtime keeps only a small number of decoder blocks resident on GPU and uses a CPU-backed block cache for the rest.
+
+Relevant arguments:
+
+- `--enable-layer-offloading`: Enable decoder block offloading.
+- `--max-resident-blocks n`: Keep at most `n` decoder blocks resident on GPU.
+
+Current behavior:
+
+- Layer offloading is implemented as a runtime feature rather than model-specific remap files.
+- It is designed to work with the current decoder-only model implementations in this repo.
+- Enabling layer offloading disables CUDA graph capture for that tenant path.
+
+Typical multi-tenant test command:
+
+```bash
+python -m minisgl \
+  --model "/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --extra-model qwen="/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --enable-parameter-offloading \
+  --offload-idle-seconds 0 \
+  --max-active-models 1 \
+  --enable-layer-offloading \
+  --max-resident-blocks 1
+```
+
 ## Supported Models
 
 Our framework currently supports the following dense model architectures:

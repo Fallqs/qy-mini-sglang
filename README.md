@@ -21,6 +21,8 @@ Mini-SGLang is a compact implementation of [SGLang](https://github.com/sgl-proje
   - **Tensor Parallelism**: Scales inference across multiple GPUs.
   - **Optimized Kernels**: Integrates **FlashAttention** and **FlashInfer** for maximum efficiency.
   - **Multi-Tenant Engine**: Serve multiple independent models simultaneously on the same GPUs with a shared KV memory pool (tensor-parallelism supported).
+  - **Parameter Offloading**: Offload inactive tenant models back to CPU pinned memory and reactivate them on demand.
+  - **Layer Offloading**: Keep only a small number of decoder blocks resident on GPU while running the rest through a CPU-backed block cache.
   - ...
 
 ## 🚀 Quick Start
@@ -139,6 +141,43 @@ When multi-tenant mode is active, the OpenAI-compatible API uses the standard `m
 
 Once the server is running, you can send requests using standard tools like `curl` or any OpenAI-compatible client.
 
+#### Multi-Tenant Parameter Offloading
+
+Mini-SGLang can also offload inactive tenant models back to CPU memory. This is useful when one engine hosts multiple tenants but only a small number of them should stay resident on GPU at the same time.
+
+```bash
+python -m minisgl \
+  --model "/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --extra-model qwen="/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --enable-parameter-offloading \
+  --offload-idle-seconds 0 \
+  --max-active-models 1
+```
+
+With this configuration:
+- inactive tenants are eligible for whole-model offloading;
+- at most one tenant model stays active on GPU at a time.
+
+#### Layer Offloading
+
+For decoder-only models with a standard `model.layers` layout, Mini-SGLang can further reduce peak model residency by keeping only a small number of decoder blocks on GPU.
+
+```bash
+python -m minisgl \
+  --model "/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --extra-model qwen="/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --enable-parameter-offloading \
+  --offload-idle-seconds 0 \
+  --max-active-models 1 \
+  --enable-layer-offloading \
+  --max-resident-blocks 1
+```
+
+Notes:
+- `--enable-layer-offloading` currently disables CUDA graph capture for that tenant path.
+- Shell mode does not support `--dummy-weight`.
+- The OpenAI-compatible API is often more convenient than shell mode for repeatable multi-tenant tests.
+
 ### 4. Interactive Shell
 
 Chat with your model directly in the terminal by adding the `--shell` flag.
@@ -162,6 +201,42 @@ python -u -m minisgl \
 #   [default] $ Hello!
 #   /model:qwen
 #   [qwen] $ 你好!
+```
+
+For multi-tenant offloading tests, a typical shell command is:
+
+```bash
+python -u -m minisgl \
+  --model "/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --extra-model qwen="/data/vlm/jlk/qyinfra/Qwen3-0.6B" \
+  --shell \
+  --enable-parameter-offloading \
+  --offload-idle-seconds 0 \
+  --max-active-models 1 \
+  --enable-layer-offloading \
+  --max-resident-blocks 1
+```
+
+And the equivalent API test flow is:
+
+```bash
+curl -N http://127.0.0.1:1919/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "messages": [{"role": "user", "content": "hello"}],
+    "max_tokens": 32,
+    "temperature": 0
+  }'
+
+curl -N http://127.0.0.1:1919/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen",
+    "messages": [{"role": "user", "content": "hello"}],
+    "max_tokens": 32,
+    "temperature": 0
+  }'
 ```
 
 ## Benchmark
