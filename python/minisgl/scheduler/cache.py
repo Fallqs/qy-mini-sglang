@@ -106,6 +106,19 @@ class CacheManager:
                 f" cache_pages({cache_pages}) > num_pages({self.num_pages})"
             )
 
+    def reset(self) -> None:
+        size_info = self.prefix_cache.size_info
+        if size_info.protected_size != 0:
+            raise RuntimeError(
+                f"Cannot reset cache manager for tenant {self.tenant_id}: "
+                f"{size_info.protected_size} protected tokens remain."
+            )
+        if size_info.evictable_size > 0:
+            evicted = self.prefix_cache.evict(size_info.evictable_size)
+            self.allocator.free(self.tenant_id, evicted)
+        self.prefix_cache.reset()
+        self.page_table.zero_()
+
     @contextmanager
     def lazy_free_region(self):
         lazy_indices_list: List[torch.Tensor] = []

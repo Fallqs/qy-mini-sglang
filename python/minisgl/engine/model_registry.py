@@ -25,7 +25,7 @@ class ModelHandle:
         self.runtime = runtime
         self.use_dummy_weight = use_dummy_weight
         self.active_model: torch.nn.Module | None = None
-        self.state_dict_cpu: Dict[str, torch.Tensor] | None = None
+        self.offloaded_model: torch.nn.Module | None = None
         self.offload_count = 0
         self.activation_count = 0
         self.block_specs: list[BlockSpec] = []
@@ -47,26 +47,31 @@ class ModelHandle:
 
         logger.info(f"Activating model {self.model_path}")
         set_rope_device(self.runtime.device)
-        with torch.device("meta"), torch_dtype(self.runtime.dtype):
-            model = create_model(self.model_config)
-
-        if self.use_dummy_weight:
-            state_dict = {
-                k: torch.randn_like(v, device=self.runtime.device)
-                for k, v in model.state_dict().items()
-            }
-        elif self.state_dict_cpu is not None:
+        model = self.offloaded_model
+        if model is not None:
             state_dict = {
                 k: v.to(self.runtime.device, non_blocking=True)
-                for k, v in self.state_dict_cpu.items()
+                for k, v in model.state_dict().items()
             }
+            model.load_state_dict(state_dict)
+            self.offloaded_model = None
         else:
-            state_dict = {
-                k: v.to(self.runtime.dtype)
-                for k, v in load_weight(self.model_path, self.runtime.device)
-            }
+            with torch.device("meta"), torch_dtype(self.runtime.dtype):
+                model = create_model(self.model_config)
 
-        model.load_state_dict(state_dict)
+            if self.use_dummy_weight:
+                state_dict = {
+                    k: torch.randn_like(v, device=self.runtime.device)
+                    for k, v in model.state_dict().items()
+                }
+            else:
+                state_dict = {
+                    k: v.to(self.runtime.dtype)
+                    for k, v in load_weight(self.model_path, self.runtime.device)
+                }
+
+            model.load_state_dict(state_dict)
+
         self.active_model = model
         if not self.block_specs:
             self.block_specs = discover_model_blocks(model)
@@ -84,11 +89,12 @@ class ModelHandle:
         if self.active_model is None:
             return
         logger.info(f"Deactivating model for config {self.model_config.model_type}")
-        self.state_dict_cpu = {
+        state_dict_cpu = {
             k: self._to_pinned_cpu(v)
             for k, v in self.active_model.state_dict().items()
         }
-        del self.active_model
+        self.active_model.load_state_dict(state_dict_cpu)
+        self.offloaded_model = self.active_model
         self.active_model = None
         self.offload_count += 1
         torch.cuda.empty_cache()

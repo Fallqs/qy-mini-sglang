@@ -19,3 +19,8 @@ class TableManager:
 
     def free(self, slot: int) -> None:
         self._free_slots.append(slot)
+
+    def reset(self) -> None:
+        self._free_slots = list(range(self._max_running_reqs))
+        self.page_table.zero_()
+        self.token_pool.zero_()

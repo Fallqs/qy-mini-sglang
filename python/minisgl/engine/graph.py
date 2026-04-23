@@ -176,5 +176,9 @@ class GraphRunner:
 
     # NOTE: This must be called before freeing NCCL resources to prevent program hang
     def destroy_cuda_graphs(self) -> None:
-        del self.graph_map
+        self.attn_backend.reset_capture_graph()
+        if hasattr(self, "graph_map"):
+            del self.graph_map
+        if hasattr(self, "buffer"):
+            del self.buffer
         gc.collect()

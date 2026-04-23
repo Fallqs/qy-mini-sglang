@@ -135,6 +135,11 @@ class FlashAttentionBackend(BaseAttnBackend):
         self.capture.seq_lens[:bs].copy_(metadata.cache_seqlens)
         self.capture.page_table[:bs, :table_len].copy_(metadata.page_table)
 
+    def reset_capture_graph(self) -> None:
+        self.capture = None
+        self.capture_bs = []
+        self.max_graph_bs = 0
+
 
 def _fa_sgl_impl(
     q: torch.Tensor,

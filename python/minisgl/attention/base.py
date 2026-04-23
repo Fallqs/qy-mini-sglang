@@ -33,6 +33,10 @@ class BaseAttnBackend(ABC):
     @abstractmethod
     def prepare_for_replay(self, batch: Batch) -> None: ...
 
+    def reset_capture_graph(self) -> None:
+        """Release any backend state associated with CUDA graph capture."""
+        return None
+
 
 class HybridBackend(BaseAttnBackend):
     def __init__(
@@ -61,3 +65,7 @@ class HybridBackend(BaseAttnBackend):
 
     def prepare_for_replay(self, batch: Batch) -> None:
         self.decode_backend.prepare_for_replay(batch)
+
+    def reset_capture_graph(self) -> None:
+        self.prefill_backend.reset_capture_graph()
+        self.decode_backend.reset_capture_graph()

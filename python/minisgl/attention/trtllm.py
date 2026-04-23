@@ -160,3 +160,8 @@ class TensorRTLLMBackend(BaseAttnBackend):
         self.capture.cu_seqlens_k[: bs + 1].copy_(metadata.cu_seqlens_k)
         self.capture.seq_lens[:bs].copy_(metadata.cache_seqlens)
         self.capture.page_table[:bs, :table_len].copy_(metadata.page_table)
+
+    def reset_capture_graph(self) -> None:
+        self.capture = None
+        self.capture_bs = []
+        self.max_graph_bs = 0

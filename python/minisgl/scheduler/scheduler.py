@@ -96,6 +96,17 @@ class Scheduler(SchedulerIOMixin):
             raise ValueError(f"Unknown tenant: {tenant_id}")
         return self.tenant_units[tenant_id]
 
+    def _reset_tenant_state(self, tenant_id: str) -> None:
+        unit = self._get_tenant(tenant_id)
+        if unit.decode_manager.runnable or unit.prefill_manager.runnable:
+            raise RuntimeError(f"Cannot reset tenant {tenant_id} while requests are still runnable")
+        unit.cache_manager.reset()
+        unit.table_manager.reset()
+
+    def _offload_inactive_tenants(self, keep_tenant_id: str | None = None) -> None:
+        for tenant_id in self.engine.maybe_offload_inactive_tenants(keep_tenant_id=keep_tenant_id):
+            self._reset_tenant_state(tenant_id)
+
     def add_tenant(self, tenant_id: str, config: SchedulerConfig | None = None) -> None:
         """Add a new tenant to the scheduler."""
         cfg = config or self.engine.base_config
@@ -108,7 +119,7 @@ class Scheduler(SchedulerIOMixin):
         strict = len(self.tenant_units) == 1
         for unit in self.tenant_units.values():
             unit.cache_manager.check_integrity(strict=strict)
-        self.engine.maybe_offload_inactive_tenants()
+        self._offload_inactive_tenants()
 
     def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
         """
@@ -256,6 +267,7 @@ class Scheduler(SchedulerIOMixin):
     def _prepare_batch(self, tenant_id: str, batch: Batch) -> ForwardInput:
         unit = self._get_tenant(tenant_id)
         tenant_ctx = unit.tenant_ctx
+        self._offload_inactive_tenants(keep_tenant_id=tenant_id)
         tenant_ctx.ensure_active()
         assert tenant_ctx.graph_runner is not None
         tenant_ctx.graph_runner.pad_batch(batch)

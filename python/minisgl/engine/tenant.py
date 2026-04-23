@@ -220,9 +220,10 @@ class TenantContext:
 
     def deactivate(self) -> None:
         """Offload model weights to free GPU memory for other tenants."""
+        if self.graph_runner is not None:
+            self.graph_runner.destroy_cuda_graphs()
+            self.graph_runner = None
         self.model_handle.deactivate()
-        # We keep CUDA graphs around; they will be recreated on next activation
-        self.graph_runner = None
         self.layer_offload_manager = None
         self.ctx.layer_offload_manager = None
 

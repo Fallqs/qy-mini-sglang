@@ -269,3 +269,9 @@ class FlashInferBackend(BaseAttnBackend):
         assert self.capture is not None and bs in self.capture_bs
         metadata.wrapper = self.graph_wrappers[bs]
         self._initialize_metadata_once(metadata)
+
+    def reset_capture_graph(self) -> None:
+        self.capture = None
+        self.capture_bs = []
+        self.max_graph_bs = 0
+        self.graph_wrappers.clear()
