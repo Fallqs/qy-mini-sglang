@@ -231,6 +231,42 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         help="Extra model for multi-tenant mode. Format: tenant_id=model_path. Can be specified multiple times.",
     )
 
+    parser.add_argument(
+        "--enable-parameter-offloading",
+        action="store_true",
+        default=ServerArgs.enable_parameter_offloading,
+        help="Allow inactive tenant models to offload weights back to CPU pinned memory.",
+    )
+
+    parser.add_argument(
+        "--offload-idle-seconds",
+        type=float,
+        default=ServerArgs.offload_idle_seconds,
+        help="Idle time before an inactive tenant model becomes eligible for offloading.",
+    )
+
+    parser.add_argument(
+        "--max-active-models",
+        type=int,
+        default=ServerArgs.max_active_models,
+        help="Maximum number of tenant models kept active on GPU when parameter offloading is enabled. "
+        "Use 0 to disable the active-model limit.",
+    )
+
+    parser.add_argument(
+        "--enable-layer-offloading",
+        action="store_true",
+        default=ServerArgs.enable_layer_offloading,
+        help="Enable block-level parameter offloading for transformer layers.",
+    )
+
+    parser.add_argument(
+        "--max-resident-blocks",
+        type=int,
+        default=ServerArgs.max_resident_blocks,
+        help="Maximum number of transformer blocks kept resident on GPU when layer offloading is enabled.",
+    )
+
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
 
@@ -271,6 +307,8 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     kwargs["dtype"] = DTYPE_MAP[dtype_str] if isinstance(dtype_str, str) else dtype_str
     kwargs["tp_info"] = DistributedInfo(0, kwargs["tensor_parallel_size"])
     del kwargs["tensor_parallel_size"]
+    if kwargs["max_active_models"] == 0:
+        kwargs["max_active_models"] = None
 
     result = ServerArgs(**kwargs)
     logger = init_logger(__name__)

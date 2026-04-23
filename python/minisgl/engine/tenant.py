@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -13,6 +14,7 @@ from minisgl.utils import init_logger
 from .graph import GraphRunner
 from .kv_pool import KVPoolManager, VirtualKVPool
 from .model_registry import ModelRegistry
+from .offload import BlockSpec, LayerOffloadManager
 from .sample import Sampler
 
 if TYPE_CHECKING:
@@ -44,9 +46,15 @@ class TenantConfig:
     max_seq_len: int
     cache_type: str = "radix"
     use_dummy_weight: bool = False
+    enable_parameter_offloading: bool = False
+    enable_layer_offloading: bool = False
+    offload_idle_seconds: float = 30.0
+    max_resident_blocks: int = 2
 
     @classmethod
     def from_engine_config(cls, tenant_id: str, config: EngineConfig) -> TenantConfig:
+        cuda_graph_bs = None if config.enable_layer_offloading else config.cuda_graph_bs
+        cuda_graph_max_bs = 0 if config.enable_layer_offloading else config.cuda_graph_max_bs
         return cls(
             tenant_id=tenant_id,
             model_path=config.model_path,
@@ -55,11 +63,15 @@ class TenantConfig:
             max_running_req=config.max_running_req,
             attention_backend=config.attention_backend,
             moe_backend=config.moe_backend,
-            cuda_graph_bs=config.cuda_graph_bs,
-            cuda_graph_max_bs=config.cuda_graph_max_bs,
+            cuda_graph_bs=cuda_graph_bs,
+            cuda_graph_max_bs=cuda_graph_max_bs,
             page_size=config.page_size,
             max_seq_len=config.max_seq_len,
             use_dummy_weight=config.use_dummy_weight,
+            enable_parameter_offloading=config.enable_parameter_offloading,
+            enable_layer_offloading=config.enable_layer_offloading,
+            offload_idle_seconds=config.offload_idle_seconds,
+            max_resident_blocks=config.max_resident_blocks,
         )
 
 
@@ -106,6 +118,7 @@ class TenantContext:
         self.ctx = Context(config.page_size)
         self.ctx.kv_cache = self.kv_pool.pool
         self.ctx.page_table = self.page_table
+        self.ctx.layer_offload_manager = None
 
         # Attention / MoE backends call get_global_ctx() during init;
         # temporarily push our context so they can find it.
@@ -140,10 +153,40 @@ class TenantContext:
 
         # Graph runner (lazily initialized on first activation)
         self.graph_runner: GraphRunner | None = None
+        self.last_used_at = time.monotonic()
+        self.block_specs: list[BlockSpec] = list(self.model_handle.block_specs)
+        self.layer_offload_manager: LayerOffloadManager | None = None
+
+    def touch(self) -> None:
+        self.last_used_at = time.monotonic()
 
     def ensure_active(self) -> None:
         """Load model weights and capture CUDA graphs if not already active."""
+        self.touch()
         self.model_handle.activate()
+        if not self.block_specs and self.model_handle.block_specs:
+            self.block_specs = list(self.model_handle.block_specs)
+        if (
+            self.config.enable_layer_offloading
+            and self.layer_offload_manager is None
+            and self.model_handle.active_model is not None
+            and self.block_specs
+        ):
+            self.layer_offload_manager = LayerOffloadManager(
+                self.model_handle.active_model,
+                self.block_specs,
+                device=self.runtime.device,
+                max_resident_blocks=max(1, self.config.max_resident_blocks),
+            )
+            self.ctx.layer_offload_manager = self.layer_offload_manager
+            logger.info(
+                "Tenant %s enabled layer offloading with %d blocks and resident budget %d",
+                self.config.tenant_id,
+                len(self.block_specs),
+                max(1, self.config.max_resident_blocks),
+            )
+        elif self.layer_offload_manager is not None:
+            self.ctx.layer_offload_manager = self.layer_offload_manager
         if self.graph_runner is None:
             self.graph_runner = GraphRunner(
                 stream=self.runtime.stream,
@@ -180,6 +223,8 @@ class TenantContext:
         self.model_handle.deactivate()
         # We keep CUDA graphs around; they will be recreated on next activation
         self.graph_runner = None
+        self.layer_offload_manager = None
+        self.ctx.layer_offload_manager = None
 
 
 def get_free_memory(device: torch.device) -> int:

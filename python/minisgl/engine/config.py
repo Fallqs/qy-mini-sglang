@@ -29,6 +29,11 @@ class EngineConfig:
     use_pynccl: bool = True
     max_seq_len_override: int | None = None
     num_page_override: int | None = None  # if not None, will override the number of pages
+    enable_parameter_offloading: bool = False
+    offload_idle_seconds: float = 30.0
+    max_active_models: int | None = 1
+    enable_layer_offloading: bool = False
+    max_resident_blocks: int = 2
 
     @cached_property
     def hf_config(self):

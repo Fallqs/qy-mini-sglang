@@ -108,6 +108,7 @@ class Scheduler(SchedulerIOMixin):
         strict = len(self.tenant_units) == 1
         for unit in self.tenant_units.values():
             unit.cache_manager.check_integrity(strict=strict)
+        self.engine.maybe_offload_inactive_tenants()
 
     def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
         """

@@ -10,6 +10,7 @@ from minisgl.utils import nvtx_annotate
 from .base import BaseLLMModel
 from .utils import GatedMLP as MistralMLP
 from .utils import RopeAttn as MistralAttn
+from .utils import run_decoder_layers
 
 if TYPE_CHECKING:
     from .config import ModelConfig
@@ -60,8 +61,7 @@ class MistralModel(BaseOP):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         x = self.embed_tokens.forward(input_ids)
         residual: torch.Tensor | None = None
-        for layer in self.layers.op_list:
-            x, residual = layer.forward(x, residual)
+        x, residual = run_decoder_layers(self.layers, x, residual)
         return self.norm.forward(x, residual)[0]
 
 

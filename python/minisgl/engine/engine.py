@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, NamedTuple, Tuple
 
 import torch
@@ -11,6 +12,7 @@ from .config import EngineConfig
 from .graph import mem_GB
 from .kv_pool import KVPoolManager
 from .model_registry import ModelRegistry
+from .offload import OffloadPolicy, TenantOffloadState
 from .runtime import ExecutionRuntime
 from .sample import BatchSamplingArgs
 from .tenant import TenantConfig, TenantContext
@@ -51,6 +53,11 @@ class MultiTenantEngine:
         self.model_registry = ModelRegistry(self.runtime)
         self.tenants: Dict[str, TenantContext] = {}
         self.default_tenant_id: str | None = None
+        self.last_active_tenant_id: str | None = None
+        self.offload_policy = OffloadPolicy(
+            idle_seconds=base_config.offload_idle_seconds,
+            max_active_models=base_config.max_active_models,
+        )
 
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after engine init: {mem_GB(post_free_memory)}")
@@ -102,11 +109,45 @@ class MultiTenantEngine:
             raise ValueError(f"Tenant {tenant_id} not found")
         return self.tenants[tenant_id]
 
+    def _active_tenants(self) -> list[TenantContext]:
+        return [tenant for tenant in self.tenants.values() if tenant.model_handle.is_active]
+
+    def maybe_offload_inactive_tenants(self, keep_tenant_id: str | None = None) -> None:
+        if not self.base_config.enable_parameter_offloading:
+            return
+
+        now = time.monotonic()
+        states = [
+            TenantOffloadState(
+                tenant_id=tenant.config.tenant_id,
+                is_active=tenant.model_handle.is_active,
+                idle_seconds=now - tenant.last_used_at,
+                activation_count=tenant.model_handle.activation_count,
+                offload_count=tenant.model_handle.offload_count,
+            )
+            for tenant in self.tenants.values()
+        ]
+        for tenant_id in self.offload_policy.select_tenants_to_offload(
+            states,
+            keep_tenant_id=keep_tenant_id,
+        ):
+            tenant = self.tenants[tenant_id]
+            idle_time = now - tenant.last_used_at
+            logger.info(
+                "Offloading tenant %s after %.2fs idle time (%d blocks discovered)",
+                tenant.config.tenant_id,
+                idle_time,
+                len(tenant.block_specs),
+            )
+            tenant.deactivate()
+
     def forward_batch(
         self, batch: Batch, args: BatchSamplingArgs, tenant_id: str | None = None
     ) -> ForwardOutput:
         tenant = self.get_tenant(tenant_id)
         tenant.ensure_active()
+        self.last_active_tenant_id = tenant.config.tenant_id
+        self.maybe_offload_inactive_tenants(keep_tenant_id=tenant.config.tenant_id)
         assert torch.cuda.current_stream() == self.runtime.stream
         with tenant.bind(batch):
             if tenant.graph_runner.can_use_cuda_graph(batch):
@@ -121,6 +162,7 @@ class MultiTenantEngine:
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.runtime.stream)
+        tenant.touch()
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 
     def shutdown(self) -> None:

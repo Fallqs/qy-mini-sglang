@@ -7,6 +7,8 @@ from minisgl.layers import set_rope_device
 from minisgl.models import create_model, load_weight
 from minisgl.utils import init_logger, torch_dtype
 
+from .offload import BlockSpec, discover_model_blocks
+
 if TYPE_CHECKING:
     from minisgl.models import ModelConfig
     from .runtime import ExecutionRuntime
@@ -24,6 +26,20 @@ class ModelHandle:
         self.use_dummy_weight = use_dummy_weight
         self.active_model: torch.nn.Module | None = None
         self.state_dict_cpu: Dict[str, torch.Tensor] | None = None
+        self.offload_count = 0
+        self.activation_count = 0
+        self.block_specs: list[BlockSpec] = []
+        self.block_count = 0
+
+    @property
+    def is_active(self) -> bool:
+        return self.active_model is not None
+
+    def _to_pinned_cpu(self, tensor: torch.Tensor) -> torch.Tensor:
+        cpu_tensor = tensor.detach().to("cpu", copy=True)
+        if cpu_tensor.device.type == "cpu" and not cpu_tensor.is_pinned():
+            return cpu_tensor.pin_memory()
+        return cpu_tensor
 
     def activate(self) -> torch.nn.Module:
         if self.active_model is not None:
@@ -40,7 +56,10 @@ class ModelHandle:
                 for k, v in model.state_dict().items()
             }
         elif self.state_dict_cpu is not None:
-            state_dict = {k: v.to(self.runtime.device) for k, v in self.state_dict_cpu.items()}
+            state_dict = {
+                k: v.to(self.runtime.device, non_blocking=True)
+                for k, v in self.state_dict_cpu.items()
+            }
         else:
             state_dict = {
                 k: v.to(self.runtime.dtype)
@@ -49,15 +68,29 @@ class ModelHandle:
 
         model.load_state_dict(state_dict)
         self.active_model = model
+        if not self.block_specs:
+            self.block_specs = discover_model_blocks(model)
+            self.block_count = len(self.block_specs)
+            if self.block_specs:
+                logger.info(
+                    "Discovered %d offloadable blocks for model %s",
+                    len(self.block_specs),
+                    self.model_path,
+                )
+        self.activation_count += 1
         return model
 
     def deactivate(self) -> None:
         if self.active_model is None:
             return
         logger.info(f"Deactivating model for config {self.model_config.model_type}")
-        self.state_dict_cpu = {k: v.cpu() for k, v in self.active_model.state_dict().items()}
+        self.state_dict_cpu = {
+            k: self._to_pinned_cpu(v)
+            for k, v in self.active_model.state_dict().items()
+        }
         del self.active_model
         self.active_model = None
+        self.offload_count += 1
         torch.cuda.empty_cache()
 
 

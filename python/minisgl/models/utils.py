@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from minisgl.core import get_global_ctx
 from minisgl.layers import (
     AttentionLayer,
     BaseOP,
+    OPList,
     LinearColParallelMerged,
     LinearOProj,
     LinearQKVMerged,
@@ -124,3 +126,16 @@ class RopeAttn(BaseOP):
 
 
 __all__ = ["GatedMLP", "RopeAttn", "MoEMLP"]
+
+
+def run_decoder_layers(
+    layers: OPList,
+    x: torch.Tensor,
+    residual: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    mgr = get_global_ctx().layer_offload_manager
+    for idx, layer in enumerate(layers.op_list):
+        if mgr is not None:
+            mgr.prepare(idx)
+        x, residual = layer.forward(x, residual)
+    return x, residual

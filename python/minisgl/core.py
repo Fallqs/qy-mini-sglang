@@ -9,6 +9,7 @@ import torch
 
 if TYPE_CHECKING:
     from minisgl.attention import BaseAttnBackend, BaseAttnMetadata
+    from minisgl.engine.offload import LayerOffloadManager
     from minisgl.kvcache import BaseCacheHandle, BaseKVCachePool
     from minisgl.moe import BaseMoeBackend
 
@@ -106,6 +107,7 @@ class Context:
     attn_backend: BaseAttnBackend = field(init=False)
     moe_backend: BaseMoeBackend = field(init=False)
     kv_cache: BaseKVCachePool = field(init=False)
+    layer_offload_manager: LayerOffloadManager | None = field(default=None, init=False)
     _batch: Batch | None = field(default=None, init=False)
 
     @property
